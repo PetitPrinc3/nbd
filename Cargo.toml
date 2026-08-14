@@ -1,0 +1,28 @@
+[package]
+name = "nothing_but_data"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "full"] }
+socket2 = "0.6.5"
+libc = "0.2.189"
+rdkafka = { version = "0.39.0", features = ["cmake-build"] }
+bytes = "1.12.1"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"
+thiserror = "2.0.19"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+#bytes = "1"
+#byteorder = "1.5.0"
+#thiserror = "2.0.18"
+#anyhow = "1.0.103"
+#tracing = "0.1.44"
+#tracing-subscriber = "0.3.23"
+#metrics = "0.24.6"
+#metrics-exporter-prometheus = "0.18.3"
+#config = "0.15.25"
+
+[dev-dependencies]
+tokio-test = "0.4.5"
