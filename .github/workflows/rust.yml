@@ -20,6 +20,9 @@ jobs:
       run: cargo fmt
     - name: Update
       run: cargo update
+    - name: Add auditing tools
+      run: cargo install cargo-audit cargo-outdated
+    - run: rustup component add clippy
     - name: Check
       run: cargo outdated
     - name: Audit
