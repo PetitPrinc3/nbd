@@ -4,7 +4,10 @@
     <img src="./images/nbd_logo_icon_flat.png" height="200px"/>
     <h3 align="center">Nothing But Data</h1>
     <p align="center">The No-Bullshit Daemon.</p>
-    <a href="https://github.com/PetitPrinc3/nbd/actions/workflows/rust.yml/"><img src="https://github.com/PetitPrinc3/nbd/actions/workflows/rust.yml/badge.svg"/></a>
+    <div>
+        <a href="https://github.com/PetitPrinc3/nbd/actions/workflows/build.yml/"><img src="https://github.com/PetitPrinc3/nbd/actions/workflows/build.yml/badge.svg"/></a>
+        <a href="https://github.com/PetitPrinc3/nbd/actions/workflows/audit.yml/"><img src="https://github.com/PetitPrinc3/nbd/actions/workflows/audit.yml/badge.svg"/></a>
+    </div>
 </div>
 
 ---

@@ -18,7 +18,7 @@ jobs:
     - uses: actions/checkout@v4
     - name: Format
       run: cargo fmt
-    - name: Add auditing tools
+    - name: Add auditing/building tools
       run: |
         cargo install cargo-audit cargo-outdated cargo-deny
         sudo apt-get update
@@ -26,10 +26,7 @@ jobs:
         rustup component add clippy
     - name: Update
       run: cargo update
-    - name: Add auditing tools
-      run: cargo install cargo-audit cargo-outdated
-    - run: rustup component add clippy
-    - name: Check
+    - name: Update check
       run: cargo outdated
     - name: Audit
       run: cargo audit
