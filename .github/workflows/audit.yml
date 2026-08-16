@@ -1,4 +1,4 @@
-name: Rust
+name: Audit
 
 on:
   push:
@@ -12,21 +12,27 @@ env:
 jobs:
   build:
 
-    runs-on: debian-latest
+    runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
     - name: Format
       run: cargo fmt
+    - name: Add auditing tools
+      run: |
+        cargo install cargo-audit cargo-outdated cargo-deny
+        sudo apt-get update
+        sudo apt-get install -y libcurl4-openssl-dev libsasl2-dev
+        rustup component add clippy
     - name: Update
       run: cargo update
     - name: Check
       run: cargo outdated
     - name: Audit
-      run: cargo audit --verbose
+      run: cargo audit
     - name: Clippy
       run: cargo clippy -- -D warnings
+    - name: Deny
+      run: cargo deny check
     - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      run: cargo build

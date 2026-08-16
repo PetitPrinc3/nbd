@@ -8,6 +8,7 @@ pub struct Cli {
     #[arg(long, conflicts_with = "check_config_file")]
     pub config_file: Option<PathBuf>,
 
+    /// Utility to check a configuration file before use.
     #[arg(long, conflicts_with = "about")]
     pub check_config_file: Option<PathBuf>,
 
