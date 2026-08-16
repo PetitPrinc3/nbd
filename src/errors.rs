@@ -16,12 +16,15 @@ pub enum NbdError {
     #[error("Message transmission error : {0}")]
     Transmission(#[from] tokio::sync::mpsc::error::SendError<Message>),
 
-    #[error("Configuration error : {0}")]
-    Configuration(#[from] toml::de::Error),
+    #[error("Toml error : {}", .0.message())]
+    Toml(#[from] toml::de::Error),
 
     #[error("Kafka error : {0}")]
     Kafka(#[from] rdkafka::error::KafkaError),
 
     #[error("Invalid packet : {0}")]
     InvalidPacket(String),
+
+    #[error("{0}")]
+    Config(String),
 }

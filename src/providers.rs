@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -8,7 +8,7 @@ use bytes::BytesMut;
 
 use tracing::{info, warn};
 
-use crate::config::ProviderConfig;
+use crate::config::{Interface, ProviderConfig};
 use crate::errors::NbdError;
 use crate::message::Message;
 
@@ -18,20 +18,91 @@ pub struct Provider {
     pub group: IpAddr,
     topic: String,
     port: u16,
-    interface: Ipv4Addr,
+    interface: Interface,
     buff_size: usize,
     socket: Option<Socket>,
 }
 
 impl Provider {
     pub fn from_config(config: &ProviderConfig) -> Provider {
-        Provider {
-            topic: config.topic.clone(),
-            group: config.group,
-            port: config.port,
-            interface: config.interface,
-            buff_size: config.message_size,
-            socket: None,
+        if config.group.is_ipv4() {
+            match config.interface {
+                Some(Interface::V4(interface)) => Provider {
+                    topic: config.topic.clone(),
+                    group: config.group,
+                    port: config.port,
+                    interface: Interface::V4(interface),
+                    buff_size: config.message_size,
+                    socket: None,
+                },
+                Some(Interface::V6(interface)) => {
+                    warn!(
+                        "Impossible use of an Ipv6 interface ({}) for an Ipv4 group ({}). The default interface will be used instead (0.0.0.0).",
+                        interface, config.group
+                    );
+                    Provider {
+                        topic: config.topic.clone(),
+                        group: config.group,
+                        port: config.port,
+                        interface: Interface::V4(Ipv4Addr::UNSPECIFIED),
+                        buff_size: config.message_size,
+                        socket: None,
+                    }
+                }
+                None => {
+                    info!(
+                        "The default Ipv4 interface (0.0.0.0) will be used for group {} as none was specified.",
+                        config.group
+                    );
+                    Provider {
+                        topic: config.topic.clone(),
+                        group: config.group,
+                        port: config.port,
+                        interface: Interface::V4(Ipv4Addr::UNSPECIFIED),
+                        buff_size: config.message_size,
+                        socket: None,
+                    }
+                }
+            }
+        } else {
+            match config.interface {
+                Some(Interface::V6(interface)) => Provider {
+                    topic: config.topic.clone(),
+                    group: config.group,
+                    port: config.port,
+                    interface: Interface::V6(interface),
+                    buff_size: config.message_size,
+                    socket: None,
+                },
+                Some(Interface::V4(interface)) => {
+                    warn!(
+                        "Impossible use of an Ipv4 interface ({}) for an Ipv6 group ({}). The default interface will be used instead (0).",
+                        interface, config.group
+                    );
+                    Provider {
+                        topic: config.topic.clone(),
+                        group: config.group,
+                        port: config.port,
+                        interface: Interface::V6(0),
+                        buff_size: config.message_size,
+                        socket: None,
+                    }
+                }
+                None => {
+                    info!(
+                        "The default Ipv6 interface (0) will be used for group {} as none was specified.",
+                        config.group
+                    );
+                    Provider {
+                        topic: config.topic.clone(),
+                        group: config.group,
+                        port: config.port,
+                        interface: Interface::V6(0),
+                        buff_size: config.message_size,
+                        socket: None,
+                    }
+                }
+            }
         }
     }
 
@@ -63,13 +134,36 @@ impl Provider {
         match self.group {
             IpAddr::V4(ref maddr_v4) => {
                 // join to the multicast address, with all interfaces
-                self.get_socket()?
-                    .join_multicast_v4(maddr_v4, &self.interface)?;
+                match self.interface {
+                    Interface::V4(ref interface) => {
+                        self.get_socket()?.join_multicast_v4(maddr_v4, interface)?;
+                    }
+                    Interface::V6(ref interface) => {
+                        warn!(
+                            "An unexpected error occured because the requested interface ({}) is Ipv6 while the requested group is Ipv4 ({}). Defaulting to the global Ipv4 interface (0.0.0.0)",
+                            interface, maddr_v4
+                        );
+                        self.get_socket()?
+                            .join_multicast_v4(maddr_v4, &Ipv4Addr::UNSPECIFIED)?;
+                    }
+                }
             }
             IpAddr::V6(ref maddr_v6) => {
                 // join to the multicast address, with all interfaces (ipv6 uses indexes not addresses)
-                self.get_socket()?.join_multicast_v6(maddr_v6, 0)?;
-                self.get_socket()?.set_only_v6(true)?;
+                match self.interface {
+                    Interface::V6(interface) => {
+                        self.get_socket()?.join_multicast_v6(maddr_v6, interface)?;
+                        self.get_socket()?.set_only_v6(true)?;
+                    }
+                    Interface::V4(ref interface) => {
+                        warn!(
+                            "An unexpected error occured because the requested interface ({}) is Ipv4 while the requested group is Ipv6 ({}). Defaulting to the global Ipv4 interface (0)",
+                            interface, maddr_v6
+                        );
+                        self.get_socket()?.join_multicast_v6(maddr_v6, 0)?;
+                        self.get_socket()?.set_only_v6(true)?;
+                    }
+                }
             }
         };
 
@@ -79,10 +173,12 @@ impl Provider {
                 #[cfg(unix)]
                 socket.set_reuse_port(true)?;
                 socket.set_nonblocking(true)?;
-                match socket.bind(&SockAddr::from(SocketAddr::new(
-                    IpAddr::V4(self.interface),
-                    self.port,
-                ))) {
+                let binding_addr = if self.group.is_ipv4() {
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.port)
+                } else {
+                    SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), self.port)
+                };
+                match socket.bind(&SockAddr::from(binding_addr)) {
                     Ok(_) => Ok(()),
                     Err(e) => Err(NbdError::Socket(format!("Binding failed : {}", e))),
                 }?;
@@ -96,7 +192,11 @@ impl Provider {
         Ok(())
     }
 
-    pub async fn start_listener(&mut self, tx: mpsc::Sender<Message>) -> Result<(), NbdError> {
+    pub async fn start_listener(
+        &mut self,
+        tx: mpsc::Sender<Message>,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<(), NbdError> {
         let udp_socket: std::net::UdpSocket = match self.socket.take() {
             Some(socket) => Ok(socket.into()),
             None => Err(NbdError::Socket(String::from(
@@ -108,27 +208,35 @@ impl Provider {
         let mut buf = BytesMut::with_capacity(self.buff_size);
 
         loop {
-            match listener.recv_buf(&mut buf).await {
-                Ok(len) => {
-                    let current_buffer = buf.split_to(len).freeze();
-                    buf.reserve(self.buff_size);
-                    match Message::from_bytes(current_buffer, self.topic.clone()) {
-                        Ok(message) => {
-                            tx.send(message).await?;
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    warn!("Listener on {} was cancelled.", self.group);
+                    break Ok(());
+                }
+                stat = listener.recv_buf(&mut buf) => {
+                    match stat {
+                        Ok(len) => {
+                            let current_buffer = buf.split_to(len).freeze();
+                            buf.reserve(self.buff_size);
+                            match Message::from_bytes(current_buffer, self.topic.clone()) {
+                                Ok(message) => {
+                                    tx.send(message).await?;
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to create message from bytes from {} : {}",
+                                        &self.group, e
+                                    );
+                                }
+                            };
                         }
                         Err(e) => {
                             warn!(
-                                "Failed to create message from bytes from {} : {}",
+                                "A network error occured while listeninto {} : {}",
                                 &self.group, e
                             );
                         }
-                    };
-                }
-                Err(e) => {
-                    warn!(
-                        "A network error occured while listenin to {} : {}",
-                        &self.group, e
-                    );
+                    }
                 }
             };
         }
