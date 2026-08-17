@@ -13,20 +13,6 @@ pub struct Config {
     pub nbd: NbdConfig,
 }
 
-impl Config {
-    pub fn clone(&self) -> Config {
-        Config {
-            provider: self
-                .provider
-                .iter()
-                .map(|provider| provider.clone())
-                .collect(),
-            kafka: self.kafka.clone(),
-            nbd: self.nbd.clone(),
-        }
-    }
-}
-
 #[derive(Deserialize)]
 pub struct ProviderConfig {
     #[serde(default = "default_topic")]
@@ -37,22 +23,6 @@ pub struct ProviderConfig {
     #[serde(default = "default_message_size")]
     pub message_size: usize,
     pub interface: Option<Interface>,
-}
-
-impl ProviderConfig {
-    pub fn clone(&self) -> ProviderConfig {
-        ProviderConfig {
-            topic: self.topic.clone(),
-            group: self.group,
-            port: self.port,
-            message_size: self.message_size,
-            interface: match self.interface {
-                Some(Interface::V4(interface)) => Some(Interface::V4(interface)),
-                Some(Interface::V6(interface)) => Some(Interface::V6(interface)),
-                None => None,
-            },
-        }
-    }
 }
 
 fn default_topic() -> String {
@@ -70,27 +40,26 @@ fn default_message_size() -> usize {
 #[derive(Deserialize)]
 pub struct ProducerConfig {
     pub broker: String,
-    #[serde(default = "default_timeout")]
-    pub timeout: u64,
+    #[serde(default = "default_connection_timeout")]
+    pub connection_timeout: u64,
+    #[serde(default = "default_message_timeout")]
+    pub message_timeout: u64,
     #[serde(default = "default_retries")]
-    pub retries: u16,
+    pub message_retries: u16,
 }
 
-impl ProducerConfig {
-    pub fn clone(&self) -> ProducerConfig {
-        ProducerConfig {
-            broker: self.broker.clone(),
-            timeout: self.timeout,
-            retries: self.retries,
-        }
-    }
-}
-
-fn default_timeout() -> u64 {
+fn default_connection_timeout() -> u64 {
     warn!(
-        "The `nbd.kafka.timeout` parameter is unspecified and was replaced by a default value of `6000`ms."
+        "The `nbd.kafka.connection_timeout` parameter is unspecified and was replaced by a default value of `2000`ms."
     );
-    6000
+    2000
+}
+
+fn default_message_timeout() -> u64 {
+    warn!(
+        "The `nbd.kafka.message_timeout` parameter is unspecified and was replaced by a default value of `5000`ms."
+    );
+    5000
 }
 
 fn default_retries() -> u16 {
@@ -106,21 +75,6 @@ pub struct NbdConfig {
     pub socket_buffer_size: usize,
     #[serde(default = "default_verbosity")]
     pub verbosity: VerbosityLevels,
-}
-
-impl NbdConfig {
-    pub fn clone(&self) -> NbdConfig {
-        NbdConfig {
-            socket_buffer_size: self.socket_buffer_size,
-            verbosity: match self.verbosity {
-                VerbosityLevels::Trace => VerbosityLevels::Trace,
-                VerbosityLevels::Debug => VerbosityLevels::Debug,
-                VerbosityLevels::Info => VerbosityLevels::Info,
-                VerbosityLevels::Warn => VerbosityLevels::Warn,
-                VerbosityLevels::Error => VerbosityLevels::Error,
-            },
-        }
-    }
 }
 
 fn default_socket_buffer_size() -> usize {

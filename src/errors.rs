@@ -27,4 +27,7 @@ pub enum NbdError {
 
     #[error("{0}")]
     Config(String),
+
+    #[error("An error occured while terminating the process : {0}")]
+    Termination(String),
 }

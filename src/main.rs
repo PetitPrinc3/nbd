@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
-//No Bullshit Daemon
+#![deny(clippy::mem_forget)]
+// The No Bullshit Daemon.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -136,8 +137,14 @@ async fn main() -> Result<(), NbdError> {
 
         (match ClientConfig::new()
             .set("bootstrap.servers", &config.kafka.broker)
-            .set("message.timeout.ms", config.kafka.timeout.to_string())
-            .set("message.send.max.retries", config.kafka.retries.to_string())
+            .set(
+                "message.timeout.ms",
+                config.kafka.message_timeout.to_string(),
+            )
+            .set(
+                "message.send.max.retries",
+                config.kafka.message_retries.to_string(),
+            )
             .set("compression.type", "lz4")
             .set("acks", "1")
             .create::<rdkafka::producer::FutureProducer>()
@@ -145,7 +152,7 @@ async fn main() -> Result<(), NbdError> {
             Ok(producer) => {
                 match producer
                     .client()
-                    .fetch_metadata(None, Duration::from_secs(5))
+                    .fetch_metadata(None, Duration::from_millis(config.kafka.connection_timeout))
                 {
                     Ok(metadata) => {
                         info!(
@@ -216,7 +223,6 @@ async fn main() -> Result<(), NbdError> {
             return Err(e);
         }
     }
-
 }
 
 async fn task_termination(
@@ -228,18 +234,22 @@ async fn task_termination(
     })
     .await;
 
-    if listener_termination_status.is_err() {
-        error!("Some providers failed to stop correctly.");
-    }
-
     let consumer_termination_status =
         tokio::time::timeout(Duration::from_secs(5), consumer_task).await;
 
+    if listener_termination_status.is_err() {
+        error!("Some providers failed to stop correctly.");
+        return Err(NbdError::Termination(String::from(
+            "Some providers failed to stop correctly.",
+        )));
+    }
+
     if consumer_termination_status.is_err() {
         error!("The consumer task failed to stop correctly.");
+        return Err(NbdError::Termination(String::from(
+            "The consumer task failed to stop correctly.",
+        )));
     }
 
     Ok(())
 }
-
-

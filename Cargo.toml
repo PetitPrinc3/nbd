@@ -3,12 +3,13 @@ name = "nothing_but_data"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
+authors = ["Arthur Reppelin `PetitPrinc3` (arthur.reppelin@gmail.com)"]
+description = "the no bullshit daemon."
 
 [dependencies]
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "full", "signal"] }
 tokio-util = "0.7.19"
 socket2 = "0.6.5"
-libc = "0.2.189"
 rdkafka = { version = "0.39.0", features = ["cmake-build"] }
 bytes = "1.12.1"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -17,7 +18,9 @@ thiserror = "2.0.19"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 clap = { version = "4.6.6", features = ["derive"] }
-regex = "1.13.1"
 
 [build-dependencies]
 chrono = "0.4.45"
+
+[profile.release]
+overflow-checks = true

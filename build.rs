@@ -13,4 +13,8 @@ fn main() {
     let formatted_date = now.format("%b %d %Y %H:%M:%S").to_string();
 
     println!("cargo:rustc-env=BUILD_DATE={}", formatted_date);
+
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+
+    println!("cargo:rustc-env=BUILD_ARCH={}", arch);
 }

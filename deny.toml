@@ -63,6 +63,8 @@ feature-depth = 1
 # More documentation for the advisories section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
 [advisories]
+yanked = "deny"
+unmaintained = "all"
 # The path where the advisory databases are cloned/fetched into
 #db-path = "$CARGO_HOME/advisory-dbs"
 # The url(s) of the advisory databases to use
@@ -192,8 +194,15 @@ deny = [
     # Wrapper crates can optionally be specified to allow the crate when it
     # is a direct dependency of the otherwise banned crate
     #{ crate = "ansi_term@0.11.0", wrappers = ["this-crate-directly-depends-on-ansi_term"] },
+    # C wrappers dependancy checks for ANSSI requirements, allow :
+    # - cmake/libz-sys : rdkafka compilation requirements (at build time only)
+    # - iana-time-zone-haiku : chrono requirement (at build time only) 
+    # - rdkafka : project dependancy
+    { crate = "cc", wrappers = ["cmake", "libz-sys", "iana-time-zone-haiku"] },
+    { crate = "cmake", wrappers = ["rdkafka-sys"] },
+    { crate = "pkg-config", wrappers = ["libz-sys", "rdkafka-sys"] },
+    { crate = "bindgen" },
 ]
-
 # List of features to allow/deny
 # Each entry the name of a crate and a version range. If version is
 # not specified, all versions will be matched.
@@ -237,10 +246,10 @@ skip-tree = [
 [sources]
 # Lint level for what to happen when a crate from a crate registry that is not
 # in the allow list is encountered
-unknown-registry = "warn"
+unknown-registry = "deny"
 # Lint level for what to happen when a crate from a git repository that is not
 # in the allow list is encountered
-unknown-git = "warn"
+unknown-git = "deny"
 # List of URLs for allowed crate registries. Defaults to the crates.io index
 # if not specified. If it is specified but empty, no registries are allowed.
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]

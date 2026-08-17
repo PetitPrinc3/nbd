@@ -140,7 +140,7 @@ impl Provider {
                     }
                     Interface::V6(ref interface) => {
                         warn!(
-                            "An unexpected error occured because the requested interface ({}) is Ipv6 while the requested group is Ipv4 ({}). Defaulting to the global Ipv4 interface (0.0.0.0)",
+                            "An unexpected error occured because the requested interface ({}) is Ipv6 while the requested group is Ipv4 ({}). Defaulting to the default Ipv4 interface (0.0.0.0)",
                             interface, maddr_v4
                         );
                         self.get_socket()?
@@ -157,7 +157,7 @@ impl Provider {
                     }
                     Interface::V4(ref interface) => {
                         warn!(
-                            "An unexpected error occured because the requested interface ({}) is Ipv4 while the requested group is Ipv6 ({}). Defaulting to the global Ipv4 interface (0)",
+                            "An unexpected error occured because the requested interface ({}) is Ipv4 while the requested group is Ipv6 ({}). Defaulting to the default Ipv6 interface (0)",
                             interface, maddr_v6
                         );
                         self.get_socket()?.join_multicast_v6(maddr_v6, 0)?;

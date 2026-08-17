@@ -52,22 +52,31 @@ fn kafka_config_check(mut config: Config) -> Result<Config, NbdError> {
         }
     }?;
 
-    if config.kafka.timeout < 100 {
+    if config.kafka.connection_timeout < 500 {
         info!(
-            "The `kafka.timeout` parameter is low ({}ms). It is recomended to increase it to at least 100ms, depending on your infrastructure and network reliability.",
-            config.kafka.timeout
+            "The `kafka.connection_timeout` parameter is low ({}ms). It is recomended to increase it to at least 500ms, depending on your infrastructure and network reliability.",
+            config.kafka.connection_timeout
         );
     } else {
-        debug!("The `kafka.timeout` parameter is configured correctly.");
+        debug!("The `kafka.connection_timeout` parameter is configured correctly.");
     };
 
-    if config.kafka.retries < 1 {
-        warn!(
-            "The `kafka.retries` parameter cannot be 0. It was increased to the default value of `2`."
+    if config.kafka.message_timeout < 100 {
+        info!(
+            "The `kafka.message_timeout` parameter is low ({}ms). It is recomended to increase it to at least 100ms, depending on your infrastructure and network reliability.",
+            config.kafka.message_timeout
         );
-        config.kafka.retries = 2;
     } else {
-        debug!("The `kafka.retries` parameter is configured correctly.");
+        debug!("The `kafka.message_timeout` parameter is configured correctly.");
+    };
+
+    if config.kafka.message_retries < 1 {
+        warn!(
+            "The `kafka.message_retries` parameter cannot be 0. It was increased to the default value of `2`."
+        );
+        config.kafka.message_retries = 2;
+    } else {
+        debug!("The `kafka.message_retries` parameter is configured correctly.");
     };
 
     Ok(config)
@@ -102,21 +111,30 @@ pub fn kafka_topic_check(topic: &str, idx: usize) -> Result<(), NbdError> {
 }
 
 fn provider_config_check(mut config: Config) -> Result<Config, NbdError> {
-    let initial_config = config.clone();
+    if config.provider.is_empty() {
+        error!("At list one provider is required.");
+        return Err(NbdError::Config(String::from(
+            "At list one provider is required.",
+        )));
+    }
 
-    for (idx, provider) in initial_config.provider.iter().enumerate() {
+    let mut idx: usize = 0;
+
+    for provider in config.provider.iter_mut() {
+        idx += 1;
+
         if provider.topic.is_empty() {
             warn!(
                 "The `providers.{}.topic` parameter is unspecified and will be replaced by a default value of `nbd-connector`.",
                 idx
             );
-            config.provider[idx].topic = String::from("nbd-connector");
+            provider.topic = String::from("nbd-connector");
         } else {
             match kafka_topic_check(&provider.topic, idx) {
                 Ok(_) => {}
                 Err(e) => {
                     warn!("{}", e);
-                    config.provider[idx].topic = String::from("nbd-connector");
+                    provider.topic = String::from("nbd-connector");
                 }
             }
         };
@@ -140,7 +158,7 @@ fn provider_config_check(mut config: Config) -> Result<Config, NbdError> {
                 "The `providers.{}.port` parameter is unspecified and will be replaced by a default value of `{}`.",
                 idx, default_port,
             );
-            config.provider[idx].port = default_port;
+            provider.port = default_port;
         } else if provider.port < 1024 {
             info!(
                 "While the `provider.{}.port` parameter is specified, using a port lower than 1023 is not recommended (see https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#Well-known_ports)",
@@ -161,7 +179,7 @@ fn provider_config_check(mut config: Config) -> Result<Config, NbdError> {
                 "The `providers.{}.message_size` parameter is unspecified and will be replaced by a default value of `{}`.",
                 idx, default_message_size,
             );
-            config.provider[idx].message_size = default_message_size;
+            provider.message_size = default_message_size;
         } else if provider.message_size > config.nbd.socket_buffer_size {
             warn!(
                 "The `providers.{}.message_size` parameter is bigger than the `nbd.socket_buffer_size` parameter ({} > {}).",
@@ -203,14 +221,14 @@ fn provider_config_check(mut config: Config) -> Result<Config, NbdError> {
                         "Impossible use of an Ipv6 interface ({}) for an Ipv4 group ({}). A default interface will be used (0.0.0.0).",
                         interface, provider.group
                     );
-                    config.provider[idx].interface = Some(Interface::V4(Ipv4Addr::UNSPECIFIED));
+                    provider.interface = Some(Interface::V4(Ipv4Addr::UNSPECIFIED));
                 }
                 None => {
                     warn!(
                         "The `providers.{}.interface` is unspecified and will be replaced by the default Ipv4 interface (0.0.0.0).",
                         idx
                     );
-                    config.provider[idx].interface = Some(Interface::V4(Ipv4Addr::UNSPECIFIED));
+                    provider.interface = Some(Interface::V4(Ipv4Addr::UNSPECIFIED));
                 }
             }
         } else {
@@ -227,14 +245,14 @@ fn provider_config_check(mut config: Config) -> Result<Config, NbdError> {
                         "Impossible use of an Ipv4 interface ({}) for an Ipv6 group ({}). A default interface will be used (0).",
                         interface, provider.group
                     );
-                    config.provider[idx].interface = Some(Interface::V6(0));
+                    provider.interface = Some(Interface::V6(0));
                 }
                 None => {
                     warn!(
                         "The `providers.{}.interface` is unspecified and will be replaced by the default Ipv4 interface (0).",
                         idx
                     );
-                    config.provider[idx].interface = Some(Interface::V6(0));
+                    provider.interface = Some(Interface::V6(0));
                 }
             }
         }
