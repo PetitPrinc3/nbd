@@ -22,7 +22,5 @@ jobs:
         sudo apt-get install -y libcurl4-openssl-dev libsasl2-dev
     - name: Format
       run: cargo fmt
-    - name: Update
-      run: cargo update
     - name: Build
       run: cargo build

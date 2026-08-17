@@ -10,16 +10,13 @@ use tracing::{debug, error, info, warn};
 
 // Checks the nbd config
 fn nbd_config_check(config: &Config) -> Result<(), NbdError> {
-    if config.nbd.socket_buffer_size < 64 {
-        error!(
-            "The submitted nbd.socket_buffer_size ({}) is to low. A UDP packet contains at least 64 bits with an empty payload.",
-            config.nbd.socket_buffer_size
-        );
+    if config.nbd.socket_buffer_size == 0 {
+        error!("The submitted nbd.socket_buffer_size is to low.");
         warn!(
             "Please increase the parameter's value to a realistic size based on the expected network traffic (a minimum of 100ko is recommended)."
         );
         Err(NbdError::Config(format!(
-            "The submitted nbd.socket_buffer_size ({}) is to low. A UDP packet contains at least 64 bits with an empty payload.",
+            "The submitted nbd.socket_buffer_size ({}) is to low.",
             config.nbd.socket_buffer_size
         )))
     } else if config.nbd.socket_buffer_size < 100 * 1024 {
@@ -37,7 +34,6 @@ fn kafka_config_check(mut config: Config) -> Result<Config, NbdError> {
     match config.kafka.broker.to_socket_addrs() {
         Ok(_) => {
             debug!("Valid ip/port combination.");
-            Ok(())
         }
         Err(_) => {
             error!(
@@ -46,11 +42,8 @@ fn kafka_config_check(mut config: Config) -> Result<Config, NbdError> {
             warn!(
                 "If you are using a hostname instead of an ip, this error can mean that the specified hostname doesn't resolve."
             );
-            Err(NbdError::Config(String::from(
-                "The submitted `kafka.broker` parameter is not a valid <ip>:<port> combination.",
-            )))
         }
-    }?;
+    };
 
     if config.kafka.connection_timeout < 500 {
         info!(
@@ -112,9 +105,9 @@ pub fn kafka_topic_check(topic: &str, idx: usize) -> Result<(), NbdError> {
 
 fn provider_config_check(mut config: Config) -> Result<Config, NbdError> {
     if config.provider.is_empty() {
-        error!("At list one provider is required.");
+        error!("At least one provider is required.");
         return Err(NbdError::Config(String::from(
-            "At list one provider is required.",
+            "At least one provider is required.",
         )));
     }
 
@@ -188,18 +181,6 @@ fn provider_config_check(mut config: Config) -> Result<Config, NbdError> {
             warn!(
                 "This is most likely a missconfiguration and will cause data loss when receiving packets longer than the `nbd.socket_buffer_size`."
             );
-        } else if provider.message_size < 64 {
-            error!(
-                "The `providers.{}.message_size` parameter ({}) is to low. A UDP packet contains at least 64 bits with an empty payload.",
-                idx, provider.message_size,
-            );
-            warn!(
-                "Please increase the parameter's value to a realistic size based on the expected network traffic (a minimum of 1500 bit is recommended)."
-            );
-            return Err(NbdError::Config(format!(
-                "The `providers.{}.message_size` parameter ({}) is to low. A UDP packet contains at least 64 bits with an empty payload.",
-                idx, provider.message_size,
-            )));
         } else {
             debug!(
                 "The `providers.{}.message_size` parameter is configured correctly.",

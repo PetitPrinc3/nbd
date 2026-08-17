@@ -13,8 +13,9 @@ pub fn about() {
     let build_vers = env!("CARGO_PKG_VERSION");
     let build_auth = env!("CARGO_PKG_AUTHORS");
     let build_desc = env!("CARGO_PKG_DESCRIPTION");
+    let env_no_color = std::env::var("NO_COLOR").unwrap_or_default();
 
-    if io::stdout().is_terminal() {
+    if env_no_color.is_empty() & io::stdout().is_terminal() {
         println!("{RESET}{ORANGE}  .@@@@@@@.    {RESET}");
         println!(
             "{RESET}{ORANGE}.@@@{RESET}{WHITE}{BOLD}o{RESET}{ORANGE}@{RESET}{WHITE}{BOLD}o{RESET}{ORANGE}@{RESET}{WHITE}{BOLD}o{RESET}{ORANGE}@@@.{RESET}{WHITE}{BOLD}  {} {} ({}) built on {}{RESET}",

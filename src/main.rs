@@ -239,6 +239,12 @@ async fn task_termination(
 
     if listener_termination_status.is_err() {
         error!("Some providers failed to stop correctly.");
+        if consumer_termination_status.is_err() {
+            error!("The consumer task failed to stop correctly.");
+            return Err(NbdError::Termination(String::from(
+                "The consumer task and some providers failed to stop correctly.",
+            )));
+        }
         return Err(NbdError::Termination(String::from(
             "Some providers failed to stop correctly.",
         )));

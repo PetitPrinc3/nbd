@@ -16,21 +16,19 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Format
-      run: cargo fmt
+    - name: Format check
+      run: cargo fmt -- --check
     - name: Add auditing/building tools
       run: |
         cargo install cargo-audit cargo-outdated cargo-deny
         sudo apt-get update
         sudo apt-get install -y libcurl4-openssl-dev libsasl2-dev
         rustup component add clippy
-    - name: Update
-      run: cargo update
-    - name: Update check
+    - name: Version check
       run: cargo outdated
-    - name: Audit
+    - name: Audit check
       run: cargo audit
-    - name: Clippy
+    - name: Clippy check
       run: cargo clippy -- -D warnings
     - name: Deny
       run: cargo deny check

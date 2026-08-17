@@ -10,9 +10,9 @@ pub struct Message {
 
 impl Message {
     pub fn from_bytes(data: Bytes, topic: String) -> Result<Self, NbdError> {
-        if data.len() < 16 {
+        if data.is_empty() {
             Err(NbdError::InvalidPacket(String::from(
-                "Received packet is too short (less than 16 bytes).",
+                "Received packet is empty.",
             )))
         } else {
             Ok(Self {
