@@ -2,6 +2,10 @@ use serde::Deserialize;
 
 use std::cmp;
 use std::fmt;
+#[cfg(feature = "metrics-exporter")]
+use std::io::ErrorKind;
+#[cfg(feature = "metrics-exporter")]
+use std::net::UdpSocket;
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::PathBuf;
 
@@ -14,6 +18,8 @@ pub struct RawConfig {
     pub provider: Vec<RawProviderConfig>,
     pub kafka: RawProducerConfig,
     pub nbd: Option<RawNbdConfig>,
+    #[cfg(feature = "metrics-exporter")]
+    pub metrics: Option<RawMetricsConfig>,
 }
 
 impl RawConfig {
@@ -51,15 +57,24 @@ pub struct RawProducerConfig {
 #[derive(Deserialize, Default)]
 pub struct RawNbdConfig {
     pub parallel_senders: Option<u32>,
-    pub parallel_receivers: Option<u32>,
+    pub parallel_listeners: Option<u32>,
     pub socket_buffer_size: Option<usize>,
     pub verbosity: Option<VerbosityLevels>,
+}
+
+#[cfg(feature = "metrics-exporter")]
+#[derive(Deserialize, Default)]
+pub struct RawMetricsConfig {
+    pub interface: Option<IpAddr>,
+    pub port: Option<u16>,
 }
 
 pub struct Config {
     pub provider: Vec<ProviderConfig>,
     pub kafka: ProducerConfig,
     pub nbd: NbdConfig,
+    #[cfg(feature = "metrics-exporter")]
+    pub metrics: MetricsConfig,
 }
 
 impl TryFrom<RawConfig> for Config {
@@ -70,12 +85,13 @@ impl TryFrom<RawConfig> for Config {
             Some(raw_nbd_config) => NbdConfig::try_from(raw_nbd_config)?,
             None => {
                 warn!(
-                    "The `nbd` section is completely missing and will be replaced by default values."
+                    "The `nbd` section is completely missing and was replaced by default values."
                 );
 
                 NbdConfig::try_from(RawNbdConfig::default())?
             }
         };
+
         let provider: Vec<ProviderConfig> = raw_config
             .provider
             .into_iter()
@@ -83,10 +99,24 @@ impl TryFrom<RawConfig> for Config {
             .map(|(idx, r)| ProviderConfig::try_from_raw(r, idx, nbd.socket_buffer_size))
             .collect::<Result<Vec<ProviderConfig>, _>>()?;
 
+        #[cfg(feature = "metrics-exporter")]
+        let metrics: MetricsConfig = match raw_config.metrics {
+            Some(raw_metrics_config) => MetricsConfig::try_from(raw_metrics_config)?,
+            None => {
+                warn!(
+                    "The `metrics` section is completely missing and was replaced by default values."
+                );
+
+                MetricsConfig::try_from(RawMetricsConfig::default())?
+            }
+        };
+
         Ok(Config {
             nbd,
             kafka,
             provider,
+            #[cfg(feature = "metrics-exporter")]
+            metrics,
         })
     }
 }
@@ -113,13 +143,69 @@ impl ProviderConfig {
             interface: Interface::V4(Ipv4Addr::UNSPECIFIED),
         };
 
+        if provider_config.group.is_multicast() {
+            debug!(
+                "The `providers.{}.group` parameter ({}) is a valid multicast address.",
+                idx, provider_config.group,
+            )
+        } else {
+            error!(
+                "The `providers.{}.group` parameter ({}) is not a valid multicast address.",
+                idx, provider_config.group,
+            );
+            return Err(NbdError::Config(format!(
+                "The `providers.{}.group` parameter ({}) is not a valid multicast address.",
+                idx, provider_config.group,
+            )));
+        }
+
+        if provider_config.group.is_ipv4() {
+            match raw_provider_config.interface {
+                Some(Interface::V4(interface)) => {
+                    provider_config.interface = Interface::V4(interface);
+                }
+                Some(Interface::V6(interface)) => {
+                    warn!(
+                        "Impossible use of an Ipv6 interface ({}) for an Ipv4 group ({}). The default interface was used instead (0.0.0.0).",
+                        interface, provider_config.group
+                    );
+                }
+                None => {
+                    info!(
+                        "The default Ipv4 interface (0.0.0.0) was used for group {} as none was specified.",
+                        provider_config.group
+                    );
+                }
+            }
+        } else {
+            match raw_provider_config.interface {
+                Some(Interface::V6(interface)) => {
+                    provider_config.interface = Interface::V6(interface);
+                }
+                Some(Interface::V4(interface)) => {
+                    warn!(
+                        "Impossible use of an Ipv4 interface ({}) for an Ipv6 group ({}). The default interface was used instead (0).",
+                        interface, provider_config.group
+                    );
+                    provider_config.interface = Interface::V6(0);
+                }
+                None => {
+                    info!(
+                        "The default Ipv6 interface (0) was used for group {} as none was specified.",
+                        provider_config.group
+                    );
+                    provider_config.interface = Interface::V6(0);
+                }
+            }
+        }
+
         match raw_provider_config.topic {
             Some(topic) => {
                 let mut valid_topic = topic.clone();
 
                 if topic.len() > 254 || topic.is_empty() {
                     error!(
-                        "The `providers.{}.topic` parameter's size is invalid as it should be between 1 and 254 chars. It will be replaced by a default value of `nbd-connector`.",
+                        "The `providers.{}.topic` parameter's size is invalid as it should be between 1 and 254 chars. It was replaced by a default value of `nbd-connector`.",
                         idx
                     );
                     valid_topic = String::from("nbd-connector");
@@ -132,7 +218,7 @@ impl ProviderConfig {
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
                 {
                     error!(
-                        "The `providers.{}.topic` parameter is invalid as it should only contain alphanumeric characters or '.-_'. It will be replaced by a default value of `nbd-connector`.",
+                        "The `providers.{}.topic` parameter is invalid as it should only contain alphanumeric characters or '.-_'. It was replaced by a default value of `nbd-connector`.",
                         idx
                     );
                     valid_topic = String::from("nbd-connector");
@@ -147,7 +233,7 @@ impl ProviderConfig {
             }
             None => {
                 warn!(
-                    "The `providers.{}.topic` parameter is unspecified and will be replaced by a default value of `nbd-connector`.",
+                    "The `providers.{}.topic` parameter is unspecified and was replaced by a default value of `nbd-connector`.",
                     idx
                 );
                 provider_config.topic = String::from("nbd-connector");
@@ -172,7 +258,7 @@ impl ProviderConfig {
                     };
 
                     warn!(
-                        "The `providers.{}.port` parameter cannot be zero and will be replaced by a default value of `{}`.",
+                        "The `providers.{}.port` parameter cannot be zero and was replaced by a default value of `{}`.",
                         &idx, default_port,
                     );
                     provider_config.port = default_port;
@@ -181,13 +267,16 @@ impl ProviderConfig {
                         "While the `{}.port` parameter is specified, using a port lower than 1023 is not recommended (see https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#Well-known_ports)",
                         &idx
                     );
+                    provider_config.port = port;
                 } else if port > 49151 {
                     info!(
                         "While the `{}.port` parameter is specified, using a port higher than 49152 is not recommended (see https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#Dynamic,_private_or_ephemeral_ports)",
                         &idx
                     );
+                    provider_config.port = port;
                 } else {
                     debug!("The `{}.port` parameter is well configured.", &idx);
+                    provider_config.port = port;
                 }
             }
             None => {
@@ -206,7 +295,7 @@ impl ProviderConfig {
                 };
 
                 warn!(
-                    "The `providers.{}.port` parameter is unspecified and will be replaced by a default value of `{}`.",
+                    "The `providers.{}.port` parameter is unspecified and was replaced by a default value of `{}`.",
                     &idx, default_port,
                 );
                 provider_config.port = default_port;
@@ -218,7 +307,7 @@ impl ProviderConfig {
                 if value == 0 {
                     let default_message_size = cmp::min(1500, socket_buffer_size);
                     warn!(
-                        "The `providers.{}.message_size` parameter is unspecified and will be replaced by a default value of `{}`.",
+                        "The `providers.{}.message_size` parameter is unspecified and was replaced by a default value of `{}`.",
                         &idx, default_message_size,
                     );
                     provider_config.message_size = default_message_size;
@@ -230,60 +319,22 @@ impl ProviderConfig {
                     warn!(
                         "This is most likely a missconfiguration and will cause data loss when receiving packets longer than the `nbd.socket_buffer_size`."
                     );
+                    provider_config.message_size = value;
                 } else {
                     debug!(
                         "The `providers.{}.message_size` parameter is configured correctly.",
                         &idx,
                     );
+                    provider_config.message_size = value;
                 };
             }
             None => {
                 let default_message_size = cmp::min(1500, socket_buffer_size);
                 warn!(
-                    "The `providers.{}.message_size` parameter is unspecified and will be replaced by a default value of `{}`.",
+                    "The `providers.{}.message_size` parameter is unspecified and was replaced by a default value of `{}`.",
                     &idx, default_message_size,
                 );
                 provider_config.message_size = default_message_size;
-            }
-        }
-
-        if provider_config.group.is_ipv4() {
-            match raw_provider_config.interface {
-                Some(Interface::V4(interface)) => {
-                    provider_config.interface = Interface::V4(interface);
-                }
-                Some(Interface::V6(interface)) => {
-                    warn!(
-                        "Impossible use of an Ipv6 interface ({}) for an Ipv4 group ({}). The default interface will be used instead (0.0.0.0).",
-                        interface, provider_config.group
-                    );
-                }
-                None => {
-                    info!(
-                        "The default Ipv4 interface (0.0.0.0) will be used for group {} as none was specified.",
-                        provider_config.group
-                    );
-                }
-            }
-        } else {
-            match raw_provider_config.interface {
-                Some(Interface::V6(interface)) => {
-                    provider_config.interface = Interface::V6(interface);
-                }
-                Some(Interface::V4(interface)) => {
-                    warn!(
-                        "Impossible use of an Ipv4 interface ({}) for an Ipv6 group ({}). The default interface will be used instead (0).",
-                        interface, provider_config.group
-                    );
-                    provider_config.interface = Interface::V6(0);
-                }
-                None => {
-                    info!(
-                        "The default Ipv6 interface (0) will be used for group {} as none was specified.",
-                        provider_config.group
-                    );
-                    provider_config.interface = Interface::V6(0);
-                }
             }
         }
 
@@ -389,7 +440,7 @@ impl From<RawProducerConfig> for ProducerConfig {
 
 pub struct NbdConfig {
     pub parallel_senders: u32,
-    pub parallel_receivers: u32,
+    pub parallel_listeners: u32,
     pub socket_buffer_size: usize,
     pub verbosity: VerbosityLevels,
 }
@@ -399,7 +450,7 @@ impl TryFrom<RawNbdConfig> for NbdConfig {
     fn try_from(raw_nbd_config: RawNbdConfig) -> Result<Self, Self::Error> {
         let mut nbd_config = NbdConfig {
             parallel_senders: 0,
-            parallel_receivers: 0,
+            parallel_listeners: 0,
             socket_buffer_size: 0,
             verbosity: VerbosityLevels::Info,
         };
@@ -430,36 +481,36 @@ impl TryFrom<RawNbdConfig> for NbdConfig {
             }
         }
 
-        match raw_nbd_config.parallel_receivers {
+        match raw_nbd_config.parallel_listeners {
             Some(value) => {
                 if value == 0 {
                     error!(
-                        "The `nbd.parallel_receivers` parameter can't be 0 and should at least be 1. A default value of 1000 is recommended."
+                        "The `nbd.parallel_listeners` parameter can't be 0 and should at least be 1. A default value of 1000 is recommended."
                     );
                     return Err(NbdError::Config(String::from(
-                        "The `nbd.parallel_receivers` parameter can't be 0.",
+                        "The `nbd.parallel_listeners` parameter can't be 0.",
                     )));
                 } else if value < 1000 {
                     warn!(
-                        "The `nbd.parallel_receivers` parameter is low ({}). It is recommended to increase it to at least 1000, depending on your infrastructure and server capabilities.",
+                        "The `nbd.parallel_listeners` parameter is low ({}). It is recommended to increase it to at least 1000, depending on your infrastructure and server capabilities.",
                         value
                     )
                 };
 
-                nbd_config.parallel_receivers = value;
+                nbd_config.parallel_listeners = value;
             }
             None => {
                 warn!(
-                    "The `nbd.parallel_receivers` parameter is unspecified and was replaced by a default value of `10 000`."
+                    "The `nbd.parallel_listeners` parameter is unspecified and was replaced by a default value of `10 000`."
                 );
-                nbd_config.parallel_receivers = 10_000;
+                nbd_config.parallel_listeners = 10_000;
             }
         }
 
-        if nbd_config.parallel_receivers <= nbd_config.parallel_senders {
+        if nbd_config.parallel_listeners <= nbd_config.parallel_senders {
             warn!(
-                "The `nbd.parallel_receivers` parameter is lower than the `config.nbd.parallel_senders` which doesn't make sense  ({} <= {}). The software should be able to receive messages faster than it sends them as to be able to back pressure the network traffic.",
-                nbd_config.parallel_receivers, nbd_config.parallel_senders,
+                "The `nbd.parallel_listeners` parameter is lower than the `config.nbd.parallel_senders` which doesn't make sense  ({} <= {}). The software should be able to receive messages faster than it sends them as to be able to back pressure the network traffic.",
+                nbd_config.parallel_listeners, nbd_config.parallel_senders,
             )
         };
 
@@ -503,6 +554,67 @@ impl TryFrom<RawNbdConfig> for NbdConfig {
         }
 
         Ok(nbd_config)
+    }
+}
+
+#[cfg(feature = "metrics-exporter")]
+pub struct MetricsConfig {
+    pub interface: IpAddr,
+    pub port: u16,
+}
+
+#[cfg(feature = "metrics-exporter")]
+impl TryFrom<RawMetricsConfig> for MetricsConfig {
+    type Error = NbdError;
+    fn try_from(raw_metrics_config: RawMetricsConfig) -> Result<Self, Self::Error> {
+        let mut metrics_config = MetricsConfig {
+            interface: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port: 9000,
+        };
+
+        match raw_metrics_config.interface {
+            Some(interface) => match UdpSocket::bind((interface, 0)) {
+                Ok(_) => {
+                    debug!("The `metrics.interface` parameter is a valid ip address.");
+                    metrics_config.interface = interface;
+                }
+                Err(e) => {
+                    if e.kind() == ErrorKind::AddrNotAvailable {
+                        warn!(
+                            "The `metrics.interface` parameter doesn't belong to the host's interfaces. It was replaced by the Ipv4 localhost interface (127.0.0.1)."
+                        );
+                    } else {
+                        error!(
+                            "An error occured while testing the `metrics.interface` parameter : {}",
+                            e
+                        );
+                        return Err(NbdError::Config(format!(
+                            "An error occured while testing the `metrics.interface` parameter : {}",
+                            e
+                        )));
+                    }
+                }
+            },
+            None => {
+                warn!(
+                    "The `metrics.interface` parameter is not set. It was be replaced by the Ipv4 localhost interface (127.0.0.1)."
+                );
+            }
+        }
+
+        match raw_metrics_config.port {
+            Some(port) => {
+                debug!("The `metrics.port` parameter is a valid ip address.");
+                metrics_config.port = port;
+            }
+            None => {
+                warn!(
+                    "The `metrics.port` parameter is not set. It was replaced by the a default value (9000)."
+                );
+            }
+        }
+
+        Ok(metrics_config)
     }
 }
 

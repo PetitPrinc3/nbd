@@ -16,6 +16,8 @@ use crate::message::Message;
 
 pub struct Provider {
     pub group: IpAddr,
+    #[cfg(feature = "metrics-exporter")]
+    pub group_label: Arc<str>,
     topic: Arc<str>,
     port: u16,
     interface: Interface,
@@ -26,8 +28,10 @@ pub struct Provider {
 impl Provider {
     pub fn from_config(config: &ProviderConfig) -> Provider {
         Provider {
-            topic: Arc::from(config.topic.as_str()),
             group: config.group,
+            #[cfg(feature = "metrics-exporter")]
+            group_label: Arc::<str>::from(config.group.to_string()),
+            topic: Arc::from(config.topic.as_str()),
             port: config.port,
             interface: config.interface.clone(),
             buff_size: config.message_size,
@@ -60,42 +64,6 @@ impl Provider {
     pub fn subscribe(&mut self, max_buffer_size: &usize) -> Result<(), NbdError> {
         self.create_socket(max_buffer_size)?;
 
-        match self.group {
-            IpAddr::V4(ref maddr_v4) => {
-                // join to the multicast address, with all interfaces
-                match self.interface {
-                    Interface::V4(ref interface) => {
-                        self.get_socket()?.join_multicast_v4(maddr_v4, interface)?;
-                    }
-                    Interface::V6(ref interface) => {
-                        warn!(
-                            "An unexpected error occured because the requested interface ({}) is Ipv6 while the requested group is Ipv4 ({}). Defaulting to the default Ipv4 interface (0.0.0.0)",
-                            interface, maddr_v4
-                        );
-                        self.get_socket()?
-                            .join_multicast_v4(maddr_v4, &Ipv4Addr::UNSPECIFIED)?;
-                    }
-                }
-            }
-            IpAddr::V6(ref maddr_v6) => {
-                // join to the multicast address, with all interfaces (ipv6 uses indexes not addresses)
-                match self.interface {
-                    Interface::V6(interface) => {
-                        self.get_socket()?.join_multicast_v6(maddr_v6, interface)?;
-                        self.get_socket()?.set_only_v6(true)?;
-                    }
-                    Interface::V4(ref interface) => {
-                        warn!(
-                            "An unexpected error occured because the requested interface ({}) is Ipv4 while the requested group is Ipv6 ({}). Defaulting to the default Ipv6 interface (0)",
-                            interface, maddr_v6
-                        );
-                        self.get_socket()?.join_multicast_v6(maddr_v6, 0)?;
-                        self.get_socket()?.set_only_v6(true)?;
-                    }
-                }
-            }
-        };
-
         match self.get_socket() {
             Ok(socket) => {
                 socket.set_reuse_address(true)?;
@@ -115,6 +83,36 @@ impl Provider {
             }
             Err(e) => Err(e),
         }?;
+
+        match self.group {
+            IpAddr::V4(ref maddr_v4) => match self.interface {
+                Interface::V4(ref interface) => {
+                    self.get_socket()?.join_multicast_v4(maddr_v4, interface)?;
+                }
+                Interface::V6(ref interface) => {
+                    warn!(
+                        "An unexpected error occured because the requested interface ({}) is Ipv6 while the requested group is Ipv4 ({}). Defaulting to the default Ipv4 interface (0.0.0.0)",
+                        interface, maddr_v4
+                    );
+                    self.get_socket()?
+                        .join_multicast_v4(maddr_v4, &Ipv4Addr::UNSPECIFIED)?;
+                }
+            },
+            IpAddr::V6(ref maddr_v6) => match self.interface {
+                Interface::V6(interface) => {
+                    self.get_socket()?.join_multicast_v6(maddr_v6, interface)?;
+                    self.get_socket()?.set_only_v6(true)?;
+                }
+                Interface::V4(ref interface) => {
+                    warn!(
+                        "An unexpected error occured because the requested interface ({}) is Ipv4 while the requested group is Ipv6 ({}). Defaulting to the default Ipv6 interface (0)",
+                        interface, maddr_v6
+                    );
+                    self.get_socket()?.join_multicast_v6(maddr_v6, 0)?;
+                    self.get_socket()?.set_only_v6(true)?;
+                }
+            },
+        };
 
         info!("Successfully subscribed to {} !", &self.group);
 
@@ -145,6 +143,11 @@ impl Provider {
                 stat = listener.recv_buf(&mut buf) => {
                     match stat {
                         Ok(len) => {
+                            #[cfg(feature = "metrics-exporter")]
+                            metrics::counter!("nbd_udp_packets_total", "group" => self.group_label.clone()).increment(1);
+                            #[cfg(feature = "metrics-exporter")]
+                            metrics::counter!("nbd_udp_bytes_total", "group" => self.group_label.clone()).increment(len as u64);
+
                             let current_buffer = buf.split_to(len).freeze();
                             buf.reserve(self.buff_size);
 
@@ -161,12 +164,15 @@ impl Provider {
                             };
                         }
                         Err(e) => {
+                            #[cfg(feature = "metrics-exporter")]
+                            metrics::counter!("nbd_errors_listeners_total", "group" => self.group_label.clone()).increment(1);
+
                             warn!(
                                 "A network error occured while listeninto {} : {}",
                                 &self.group, e
                             );
                         }
-                    }
+                    };
                 }
             };
         }

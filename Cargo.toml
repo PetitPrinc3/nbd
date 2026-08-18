@@ -7,7 +7,7 @@ authors = ["Arthur Reppelin `PetitPrinc3` (arthur.reppelin@gmail.com)"]
 description = "the no bullshit daemon."
 
 [dependencies]
-tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "full", "signal"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "signal", "io-util"] }
 tokio-util = "0.7.19"
 socket2 = "0.6.5"
 rdkafka = { version = "0.39.0", features = ["cmake-build"] }
@@ -18,9 +18,15 @@ thiserror = "2.0.19"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 clap = { version = "4.6.6", features = ["derive"] }
+metrics = { version = "0.24", optional = true }
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"], optional = true }
 
 [build-dependencies]
 chrono = "0.4.45"
 
 [profile.release]
 overflow-checks = true
+
+[features]
+default = []
+metrics-exporter = ["dep:metrics", "dep:metrics-exporter-prometheus"]

@@ -4,6 +4,10 @@ use crate::message::Message;
 
 #[derive(Error, Debug)]
 pub enum NbdError {
+    #[cfg(feature = "metrics-exporter")]
+    #[error("{0}")]
+    Setup(String),
+
     #[error("Socket creation failed : {0}")]
     Socket(String),
 

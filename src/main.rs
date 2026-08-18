@@ -19,6 +19,9 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt, reload};
 
+#[cfg(feature = "metrics-exporter")]
+use metrics_exporter_prometheus::PrometheusBuilder;
+
 use clap::Parser;
 
 mod config;
@@ -82,6 +85,30 @@ async fn main() -> Result<(), NbdError> {
     let raw_config = RawConfig::from_path(&config_path)?;
     let config = Config::try_from(raw_config)?;
 
+    #[cfg(feature = "metrics-exporter")]
+    match PrometheusBuilder::new()
+        .with_http_listener((config.metrics.interface, config.metrics.port))
+        .install()
+    {
+        Ok(_) => {
+            info!(
+                "Prometheus metrics exporter started at http://{}:{}",
+                config.metrics.interface, config.metrics.port,
+            );
+            Ok(())
+        }
+        Err(e) => {
+            error!(
+                "Failed to start Prometheus metrics exporter on http://{}:{} : {}",
+                config.metrics.interface, config.metrics.port, e,
+            );
+            Err(NbdError::Setup(format!(
+                "Failed to start Prometheus metrics exporter on http://{}:{} : {}",
+                config.metrics.interface, config.metrics.port, e,
+            )))
+        }
+    }?;
+
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(config.nbd.verbosity.to_string()));
 
@@ -92,9 +119,9 @@ async fn main() -> Result<(), NbdError> {
         );
     }
 
-    let mut tasks = JoinSet::new();
+    let mut listener_tasks = JoinSet::<Result<(), NbdError>>::new();
 
-    let (tx, mut rx) = mpsc::channel::<Message>(config.nbd.parallel_receivers as usize);
+    let (tx, mut rx) = mpsc::channel::<Message>(config.nbd.parallel_listeners as usize);
 
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
@@ -106,7 +133,7 @@ async fn main() -> Result<(), NbdError> {
         let task_tx = tx.clone();
         let task_tk = cancel_token.clone();
 
-        tasks.spawn(async move {
+        listener_tasks.spawn(async move {
             let mut provider: Provider = Provider::from_config(&candidate);
             match provider.subscribe(&config.nbd.socket_buffer_size) {
                 Ok(()) => match provider.start_listener(task_tx, task_tk).await {
@@ -116,6 +143,7 @@ async fn main() -> Result<(), NbdError> {
                             "Something went wrong while listening to {} : {}",
                             provider.group, e
                         );
+                        return Err(e);
                     }
                 },
                 Err(e) => {
@@ -123,8 +151,11 @@ async fn main() -> Result<(), NbdError> {
                         "Something went wrong while subscribing to {} : {}",
                         provider.group, e
                     );
+                    return Err(e);
                 }
             };
+
+            Ok(())
         });
     }
 
@@ -187,12 +218,18 @@ async fn main() -> Result<(), NbdError> {
                                     .await
                                 {
                                     Ok(_) => {
+                                        #[cfg(feature = "metrics-exporter")]
+                                        metrics::counter!("nbd_kafka_sent_total", "topic" => message.topic.clone()).increment(1);
+
                                         debug!(
                                             "Successfully sent some message on topic {} !",
                                             &message.topic
                                         );
                                     }
                                     Err((e, _)) => {
+                                        #[cfg(feature = "metrics-exporter")]
+                                        metrics::counter!("nbd_errors_kafka_total", "topic" => message.topic.clone()).increment(1);
+
                                         warn!(
                                             "Failed to send one message on topic {} : {}",
                                             &message.topic, e
@@ -204,6 +241,9 @@ async fn main() -> Result<(), NbdError> {
                             });
                         }
                         Err(e) => {
+                            #[cfg(feature = "metrics-exporter")]
+                            metrics::counter!("nbd_errors_kafka_total", "topic" => message.topic.clone()).increment(1);
+
                             warn!(
                                 "Failed to acquire an async permit to send message on topic {} : {}",
                                 &message.topic, e
@@ -222,6 +262,8 @@ async fn main() -> Result<(), NbdError> {
                     }
                 };
 
+                producer.flush(Duration::from_secs(3))?;
+
                 consumer_tk.cancel();
 
                 Ok(())
@@ -238,15 +280,59 @@ async fn main() -> Result<(), NbdError> {
         _ = ctrl_c => { info!("Received Ctrl+C signal, stopping NBD."); cancel_token.cancel(); drop(tx) }
         _ = sigterm.recv() => { info!("Received SIGTERM signal, stopping NBD."); cancel_token.cancel(); drop(tx) }
         _ = cancel_token.cancelled() => {}
+        Some(res) = listener_tasks.join_next() => {
+            match res {
+                Ok(Ok(())) => {
+                    debug!("A listener stopped gracefully.");
+                },
+                Ok(Err(e)) => {
+                    error!("A fatal error occured with one or more listener : {}", e);
+                    error!("NBD will now try to stop gracefully.");
+                    cancel_token.cancel();
+                    drop(tx);
+                }
+                Err(e) => {
+                    if e.is_panic() {
+                        error!("NBD panicked while listening to the network traffic : {}", e);
+                    } else {
+                        warn!("A listener was cancelled : {}", e);
+                    }
+                    cancel_token.cancel();
+                    drop(tx);
+                }
+            }
+        }
     }
 
     #[cfg(windows)]
     tokio::select! {
         _ = ctrl_c => { info!("Received Ctrl+C signal, stopping NBD."); cancel_token.cancel(); drop(tx) }
         _ = cancel_token.cancelled() => {}
+        Some(res) = listener_tasks.join_next() => {
+            match res {
+                Ok(Ok(())) => {
+                    debug!("A listener stopped gracefully.");
+                },
+                Ok(Err(e)) => {
+                    error!("A fatal error occured with one or more listener : {}", e);
+                    error!("NBD will now try to stop gracefully.");
+                    cancel_token.cancel();
+                    drop(tx);
+                }
+                Err(e) => {
+                    if e.is_panic() {
+                        error!("NBD panicked while listening to the network traffic : {}", e);
+                    } else {
+                        warn!("A listener was cancelled : {}", e);
+                    }
+                    cancel_token.cancel();
+                    drop(tx);
+                }
+            }
+        }
     }
 
-    match task_termination(tasks, consumer_task).await {
+    match task_termination(listener_tasks, consumer_task).await {
         Ok(_) => {
             info!("NBD exited gracefully.");
             return Ok(());
@@ -259,7 +345,7 @@ async fn main() -> Result<(), NbdError> {
 }
 
 async fn task_termination(
-    mut listener_tasks: tokio::task::JoinSet<()>,
+    mut listener_tasks: tokio::task::JoinSet<Result<(), NbdError>>,
     consumer_task: tokio::task::JoinHandle<Result<(), NbdError>>,
 ) -> Result<(), NbdError> {
     let listener_termination_status = tokio::time::timeout(Duration::from_secs(5), async {

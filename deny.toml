@@ -97,7 +97,7 @@ allow = [
     #"BSD-2-Clause",
     "BSD-3-Clause",
     #"ISC",
-    #"Zlib",
+    "Zlib",
     "Unlicense",
     #"CC0-1.0",
     #"GPL-3.0-only",
@@ -197,8 +197,9 @@ deny = [
     # C wrappers dependancy checks for ANSSI requirements, allow :
     # - cmake/libz-sys : rdkafka compilation requirements (at build time only)
     # - iana-time-zone-haiku : chrono requirement (at build time only) 
+    # - generator : prometheus exporter requirement (at build time only)
     # - rdkafka : project dependancy
-    { crate = "cc", wrappers = ["cmake", "libz-sys", "iana-time-zone-haiku"] },
+    { crate = "cc", wrappers = ["cmake", "libz-sys", "iana-time-zone-haiku", "generator"] },
     { crate = "cmake", wrappers = ["rdkafka-sys"] },
     { crate = "pkg-config", wrappers = ["libz-sys", "rdkafka-sys"] },
     { crate = "bindgen" },

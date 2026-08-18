@@ -21,6 +21,7 @@ It complies with the [ANSSI requirements](https://anssi-fr.github.io/rust-guide/
 The software features :
 - a high performance data pipeline from multiple multicast groups to a single Kafka broker ;
 - a comprehensive configuration file checking utility ;
+- an optional (yet recommended) prometheus metrics exporter over http ;
 
 # Documentation
 The documentation of the software is hosted on its [Wiki](https://github.com/PetitPrinc3/nbd/wiki).  
@@ -32,3 +33,4 @@ It provides a comprehensive guide to :
 As well as :
 * a software performance review ;
 * an ANSSI requirement conformation matrix ;
+* a prometheus reporting and alerting configuration example ;

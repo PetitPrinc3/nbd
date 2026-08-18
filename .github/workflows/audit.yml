@@ -18,6 +18,8 @@ jobs:
     - uses: actions/checkout@v4
     - name: Format check
       run: cargo fmt -- --check
+    - name: Cargo check
+      run: cargo check --all-features
     - name: Add auditing/building tools
       run: |
         cargo install cargo-audit cargo-outdated cargo-deny
@@ -30,7 +32,7 @@ jobs:
       run: cargo audit
     - name: Clippy check
       run: cargo clippy -- -D warnings
-    - name: Deny
+    - name: Deny check
       run: cargo deny check
     - name: Build
       run: cargo build
