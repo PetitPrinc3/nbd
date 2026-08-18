@@ -10,6 +10,41 @@ use tracing::{debug, error, info, warn};
 
 // Checks the nbd config
 fn nbd_config_check(config: &Config) -> Result<(), NbdError> {
+    if config.nbd.parallel_senders == 0 {
+        error!(
+            "The `nbd.parallel_senders` parameter can't be 0 and should at least be 1. A default value of 1000 is recommended."
+        );
+        return Err(NbdError::Config(String::from(
+            "The `nbd.parallel_senders` parameter can't be 0.",
+        )));
+    } else if config.nbd.parallel_senders < 100 {
+        warn!(
+            "The `nbd.parallel_senders` parameter is low ({}). It is recommended to increase it to at least 100, depending on your infrastructure and server capabilities.",
+            config.nbd.parallel_senders
+        )
+    }
+
+    if config.nbd.parallel_receivers == 0 {
+        error!(
+            "The `nbd.parallel_receivers` parameter can't be 0 and should at least be 1. A default value of 1000 is recommended."
+        );
+        return Err(NbdError::Config(String::from(
+            "The `nbd.parallel_receivers` parameter can't be 0.",
+        )));
+    } else if config.nbd.parallel_receivers < 1000 {
+        warn!(
+            "The `nbd.parallel_receivers` parameter is low ({}). It is recommended to increase it to at least 1000, depending on your infrastructure and server capabilities.",
+            config.nbd.parallel_receivers
+        )
+    }
+
+    if config.nbd.parallel_receivers <= config.nbd.parallel_senders {
+        warn!(
+            "The `nbd.parallel_receivers` parameter is lower than the `config.nbd.parallel_senders` which doesn't make sense  ({} <= {}). The software should be able to receive messages faster than it sends them as to be able to back pressure the network traffic.",
+            config.nbd.parallel_receivers, config.nbd.parallel_senders,
+        )
+    };
+
     if config.nbd.socket_buffer_size == 0 {
         error!("The submitted nbd.socket_buffer_size is to low.");
         warn!(
@@ -47,7 +82,7 @@ fn kafka_config_check(mut config: Config) -> Result<Config, NbdError> {
 
     if config.kafka.connection_timeout < 500 {
         info!(
-            "The `kafka.connection_timeout` parameter is low ({}ms). It is recomended to increase it to at least 500ms, depending on your infrastructure and network reliability.",
+            "The `kafka.connection_timeout` parameter is low ({}ms). It is recommended to increase it to at least 500ms, depending on your infrastructure and network reliability.",
             config.kafka.connection_timeout
         );
     } else {
@@ -56,7 +91,7 @@ fn kafka_config_check(mut config: Config) -> Result<Config, NbdError> {
 
     if config.kafka.message_timeout < 100 {
         info!(
-            "The `kafka.message_timeout` parameter is low ({}ms). It is recomended to increase it to at least 100ms, depending on your infrastructure and network reliability.",
+            "The `kafka.message_timeout` parameter is low ({}ms). It is recommended to increase it to at least 100ms, depending on your infrastructure and network reliability.",
             config.kafka.message_timeout
         );
     } else {

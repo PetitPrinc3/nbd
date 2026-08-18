@@ -3,9 +3,10 @@
 // The No Bullshit Daemon.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -94,7 +95,7 @@ async fn main() -> Result<(), NbdError> {
 
     let mut tasks = JoinSet::new();
 
-    let (tx, mut rx) = mpsc::channel::<Message>(1000);
+    let (tx, mut rx) = mpsc::channel::<Message>(config.nbd.parallel_receivers as usize);
 
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
@@ -146,6 +147,8 @@ async fn main() -> Result<(), NbdError> {
                 config.kafka.message_retries.to_string(),
             )
             .set("compression.type", "lz4")
+            .set("queue.buffering.max.messages", "100000")
+            .set("linger.ms", "1")
             .set("acks", "1")
             .create::<rdkafka::producer::FutureProducer>()
         {
@@ -168,29 +171,60 @@ async fn main() -> Result<(), NbdError> {
                     }
                 }?;
 
-                while let Some(message) = rx.recv().await {
-                    let record: FutureRecord<[u8], [u8]> =
-                        FutureRecord::to(&message.topic).payload(message.payload.as_ref());
+                let semaphore = Arc::new(Semaphore::new(config.nbd.parallel_senders as usize));
 
-                    match producer
-                        .send(record, Timeout::After(Duration::from_millis(100)))
-                        .await
-                    {
-                        Ok(_) => {
-                            debug!(
-                                "Successfully sent some message on topic {} !",
-                                &message.topic
+                while let Some(message) = rx.recv().await {
+                    match semaphore.clone().acquire_owned().await {
+                        Ok(permit) => {
+                            let task_producer = producer.clone();
+
+                            tokio::spawn(async move {
+                                let record: FutureRecord<[u8], [u8]> =
+                                    FutureRecord::to(&message.topic)
+                                        .payload(message.payload.as_ref());
+
+                                match task_producer
+                                    .send(record, Timeout::After(Duration::from_millis(100)))
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        debug!(
+                                            "Successfully sent some message on topic {} !",
+                                            &message.topic
+                                        );
+                                    }
+                                    Err((e, _)) => {
+                                        warn!(
+                                            "Failed to send one message on topic {} : {}",
+                                            &message.topic, e
+                                        )
+                                    }
+                                };
+
+                                drop(permit)
+                            });
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to acquire an async permit to send message on topic {} : {}",
+                                &message.topic, e
                             );
                         }
-                        Err((e, _)) => {
-                            warn!(
-                                "Failed to send one message on topic {} : {}",
-                                &message.topic, e
-                            )
-                        }
-                    }
+                    };
                 }
+
+                match semaphore.acquire_many(config.nbd.parallel_senders).await {
+                    Ok(_) => debug!("All async permits were successfully freed."),
+                    Err(e) => {
+                        warn!(
+                            "Not all senders returned, some sending operations may be abruptly stopped : {}",
+                            e
+                        );
+                    }
+                };
+
                 consumer_tk.cancel();
+
                 Ok(())
             }
             Err(e) => {

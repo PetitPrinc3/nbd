@@ -71,10 +71,28 @@ fn default_retries() -> u16 {
 
 #[derive(Deserialize)]
 pub struct NbdConfig {
+    #[serde(default = "default_parallel_senders")]
+    pub parallel_senders: u32,
+    #[serde(default = "default_parallel_receivers")]
+    pub parallel_receivers: u32,
     #[serde(default = "default_socket_buffer_size")]
     pub socket_buffer_size: usize,
     #[serde(default = "default_verbosity")]
     pub verbosity: VerbosityLevels,
+}
+
+fn default_parallel_senders() -> u32 {
+    warn!(
+        "The `nbd.parallel_senders` parameter is unspecified and was replaced by a default value of `1000`."
+    );
+    1000
+}
+
+fn default_parallel_receivers() -> u32 {
+    warn!(
+        "The `nbd.parallel_receivers` parameter is unspecified and was replaced by a default value of `10000`."
+    );
+    10000
 }
 
 fn default_socket_buffer_size() -> usize {
