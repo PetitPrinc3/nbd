@@ -22,7 +22,7 @@ use tracing_subscriber::{EnvFilter, fmt, reload};
 use clap::Parser;
 
 mod config;
-use config::Config;
+use config::{Config, RawConfig};
 
 mod providers;
 use providers::Provider;
@@ -38,9 +38,6 @@ use args::Cli;
 
 mod about;
 use about::about;
-
-mod checks;
-use checks::config_check;
 
 #[tokio::main]
 async fn main() -> Result<(), NbdError> {
@@ -65,7 +62,8 @@ async fn main() -> Result<(), NbdError> {
     }));
 
     if let Some(config_path) = args.check_config_file {
-        config_check(config_path)?;
+        let raw_config = RawConfig::from_path(&config_path)?;
+        Config::try_from(raw_config)?;
         info!("The provided configuration file is valid and can be used as-is.");
         return Ok(());
     }
@@ -81,7 +79,8 @@ async fn main() -> Result<(), NbdError> {
         }
     };
 
-    let config: Config = config_check(config_path)?;
+    let raw_config = RawConfig::from_path(&config_path)?;
+    let config = Config::try_from(raw_config)?;
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(config.nbd.verbosity.to_string()));

@@ -25,84 +25,13 @@ pub struct Provider {
 
 impl Provider {
     pub fn from_config(config: &ProviderConfig) -> Provider {
-        if config.group.is_ipv4() {
-            match config.interface {
-                Some(Interface::V4(interface)) => Provider {
-                    topic: Arc::from(config.topic.as_str()),
-                    group: config.group,
-                    port: config.port,
-                    interface: Interface::V4(interface),
-                    buff_size: config.message_size,
-                    socket: None,
-                },
-                Some(Interface::V6(interface)) => {
-                    warn!(
-                        "Impossible use of an Ipv6 interface ({}) for an Ipv4 group ({}). The default interface will be used instead (0.0.0.0).",
-                        interface, config.group
-                    );
-                    Provider {
-                        topic: Arc::from(config.topic.as_str()),
-                        group: config.group,
-                        port: config.port,
-                        interface: Interface::V4(Ipv4Addr::UNSPECIFIED),
-                        buff_size: config.message_size,
-                        socket: None,
-                    }
-                }
-                None => {
-                    info!(
-                        "The default Ipv4 interface (0.0.0.0) will be used for group {} as none was specified.",
-                        config.group
-                    );
-                    Provider {
-                        topic: Arc::from(config.topic.as_str()),
-                        group: config.group,
-                        port: config.port,
-                        interface: Interface::V4(Ipv4Addr::UNSPECIFIED),
-                        buff_size: config.message_size,
-                        socket: None,
-                    }
-                }
-            }
-        } else {
-            match config.interface {
-                Some(Interface::V6(interface)) => Provider {
-                    topic: Arc::from(config.topic.as_str()),
-                    group: config.group,
-                    port: config.port,
-                    interface: Interface::V6(interface),
-                    buff_size: config.message_size,
-                    socket: None,
-                },
-                Some(Interface::V4(interface)) => {
-                    warn!(
-                        "Impossible use of an Ipv4 interface ({}) for an Ipv6 group ({}). The default interface will be used instead (0).",
-                        interface, config.group
-                    );
-                    Provider {
-                        topic: Arc::from(config.topic.as_str()),
-                        group: config.group,
-                        port: config.port,
-                        interface: Interface::V6(0),
-                        buff_size: config.message_size,
-                        socket: None,
-                    }
-                }
-                None => {
-                    info!(
-                        "The default Ipv6 interface (0) will be used for group {} as none was specified.",
-                        config.group
-                    );
-                    Provider {
-                        topic: Arc::from(config.topic.as_str()),
-                        group: config.group,
-                        port: config.port,
-                        interface: Interface::V6(0),
-                        buff_size: config.message_size,
-                        socket: None,
-                    }
-                }
-            }
+        Provider {
+            topic: Arc::from(config.topic.as_str()),
+            group: config.group,
+            port: config.port,
+            interface: config.interface.clone(),
+            buff_size: config.message_size,
+            socket: None,
         }
     }
 
