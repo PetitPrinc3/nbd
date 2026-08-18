@@ -1,8 +1,10 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 
 use bytes::BytesMut;
 
@@ -12,11 +14,9 @@ use crate::config::{Interface, ProviderConfig};
 use crate::errors::NbdError;
 use crate::message::Message;
 
-use tokio::sync::mpsc;
-
 pub struct Provider {
     pub group: IpAddr,
-    topic: String,
+    topic: Arc<str>,
     port: u16,
     interface: Interface,
     buff_size: usize,
@@ -28,7 +28,7 @@ impl Provider {
         if config.group.is_ipv4() {
             match config.interface {
                 Some(Interface::V4(interface)) => Provider {
-                    topic: config.topic.clone(),
+                    topic: Arc::from(config.topic.as_str()),
                     group: config.group,
                     port: config.port,
                     interface: Interface::V4(interface),
@@ -41,7 +41,7 @@ impl Provider {
                         interface, config.group
                     );
                     Provider {
-                        topic: config.topic.clone(),
+                        topic: Arc::from(config.topic.as_str()),
                         group: config.group,
                         port: config.port,
                         interface: Interface::V4(Ipv4Addr::UNSPECIFIED),
@@ -55,7 +55,7 @@ impl Provider {
                         config.group
                     );
                     Provider {
-                        topic: config.topic.clone(),
+                        topic: Arc::from(config.topic.as_str()),
                         group: config.group,
                         port: config.port,
                         interface: Interface::V4(Ipv4Addr::UNSPECIFIED),
@@ -67,7 +67,7 @@ impl Provider {
         } else {
             match config.interface {
                 Some(Interface::V6(interface)) => Provider {
-                    topic: config.topic.clone(),
+                    topic: Arc::from(config.topic.as_str()),
                     group: config.group,
                     port: config.port,
                     interface: Interface::V6(interface),
@@ -80,7 +80,7 @@ impl Provider {
                         interface, config.group
                     );
                     Provider {
-                        topic: config.topic.clone(),
+                        topic: Arc::from(config.topic.as_str()),
                         group: config.group,
                         port: config.port,
                         interface: Interface::V6(0),
@@ -94,7 +94,7 @@ impl Provider {
                         config.group
                     );
                     Provider {
-                        topic: config.topic.clone(),
+                        topic: Arc::from(config.topic.as_str()),
                         group: config.group,
                         port: config.port,
                         interface: Interface::V6(0),
@@ -218,7 +218,8 @@ impl Provider {
                         Ok(len) => {
                             let current_buffer = buf.split_to(len).freeze();
                             buf.reserve(self.buff_size);
-                            match Message::from_bytes(current_buffer, self.topic.clone()) {
+
+                            match Message::from_bytes(current_buffer, Arc::clone(&self.topic)) {
                                 Ok(message) => {
                                     tx.send(message).await?;
                                 }
