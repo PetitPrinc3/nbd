@@ -24,17 +24,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 
 use clap::Parser;
 
-mod config;
-use config::{Config, RawConfig};
-
-mod providers;
-use providers::Provider;
-
-mod errors;
-use errors::NbdError;
-
-mod message;
-use message::Message;
+use nothing_but_data::{Config, Message, NbdError, Provider, RawConfig};
 
 mod args;
 use args::Cli;
@@ -134,7 +124,7 @@ async fn main() -> Result<(), NbdError> {
         let task_tk = cancel_token.clone();
 
         listener_tasks.spawn(async move {
-            let mut provider: Provider = Provider::from_config(&candidate);
+            let mut provider: Provider = Provider::from(&candidate);
             match provider.subscribe(&config.nbd.socket_buffer_size) {
                 Ok(()) => match provider.start_listener(task_tx, task_tk).await {
                     Ok(_) => {}
@@ -177,9 +167,11 @@ async fn main() -> Result<(), NbdError> {
                 config.kafka.message_retries.to_string(),
             )
             .set("compression.type", "lz4")
+            .set("max.in.flight.requests.per.connection", "5")
             .set("queue.buffering.max.messages", "100000")
+            .set("enable.idempotence", "true")
             .set("linger.ms", "1")
-            .set("acks", "1")
+            .set("acks", "all")
             .create::<rdkafka::producer::FutureProducer>()
         {
             Ok(producer) => {
@@ -269,6 +261,7 @@ async fn main() -> Result<(), NbdError> {
                 Ok(())
             }
             Err(e) => {
+                error!("A fatal error occured : {}", e);
                 consumer_tk.cancel();
                 Err(NbdError::Kafka(e))
             }

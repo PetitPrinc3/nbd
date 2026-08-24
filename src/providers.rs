@@ -25,8 +25,8 @@ pub struct Provider {
     socket: Option<Socket>,
 }
 
-impl Provider {
-    pub fn from_config(config: &ProviderConfig) -> Provider {
+impl From<&ProviderConfig> for Provider {
+    fn from(config: &ProviderConfig) -> Provider {
         Provider {
             group: config.group,
             #[cfg(feature = "metrics-exporter")]
@@ -38,7 +38,9 @@ impl Provider {
             socket: None,
         }
     }
+}
 
+impl Provider {
     fn create_socket(&mut self, max_buffer_size: &usize) -> Result<(), NbdError> {
         let domain = if self.group.is_ipv4() {
             Domain::IPV4
