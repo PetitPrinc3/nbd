@@ -1,3 +1,4 @@
+use std::cmp;
 use std::time::Duration;
 
 #[allow(dead_code)]
@@ -27,24 +28,72 @@ pub fn show_report(
         let p999 = percentile(&mut latencies, 99.9);
         let max = latencies[latencies.len() - 1];
 
-        println!("╔══════════════════════════════════╗");
-        println!("║ REPORT : {:<23} ║", test_name);
-        println!("╠══════════════════════════════════╣");
+        let format_len = cmp::max(test_name.len(), 23);
+
+        println!("{}", format!("╔═══════════{}╗", "═".repeat(format_len)));
+        println!("║ REPORT : {:<format_len$} ║", test_name);
+        println!("{}", format!("╠═══════════{}╣", "═".repeat(format_len)));
         if nb_sent.is_some() && nb_received.is_some() {
             println!(
-                "║ Accuracy            : {:>9.2}% ║",
-                ((nb_received.unwrap_or_else(|| { 0 }) as f64)
-                    / (nb_sent.unwrap_or_else(|| { 1 }) as f64))
-                    * 100.0
+                "{}",
+                format!(
+                    "║ Accuracy            : {:>format_len$.2}% ║",
+                    ((nb_received.unwrap_or_else(|| { 0 }) as f64)
+                        / (nb_sent.unwrap_or_else(|| { 1 }) as f64))
+                        * 100.0,
+                    format_len = format_len - 14
+                )
             );
         };
-        println!("║ Samples             : {:>10} ║", latencies.len());
-        println!("║ Median (p50)        : {:>10.3?} ║", p50);
-        println!("║ p95                 : {:>10.3?} ║", p95);
-        println!("║ p99 (target < 1ms)  : {:>10.3?} ║", p99);
-        println!("║ p99.9               : {:>10.3?} ║", p999);
-        println!("║ Maximum             : {:>10.3?} ║", max);
-        println!("╚══════════════════════════════════╝");
+        println!(
+            "{}",
+            format!(
+                "║ Samples             : {:>format_len$} ║",
+                latencies.len(),
+                format_len = format_len - 13
+            )
+        );
+        println!(
+            "{}",
+            format!(
+                "║ Median (p50)        : {:>format_len$.3?} ║",
+                p50,
+                format_len = format_len - 13
+            )
+        );
+        println!(
+            "{}",
+            format!(
+                "║ p95                 : {:>format_len$.3?} ║",
+                p95,
+                format_len = format_len - 13
+            )
+        );
+        println!(
+            "{}",
+            format!(
+                "║ p99 (target < 1ms)  : {:>format_len$.3?} ║",
+                p99,
+                format_len = format_len - 13
+            )
+        );
+        println!(
+            "{}",
+            format!(
+                "║ p99.9               : {:>format_len$.3?} ║",
+                p999,
+                format_len = format_len - 13
+            )
+        );
+        println!(
+            "{}",
+            format!(
+                "║ Maximum             : {:>format_len$.3?} ║",
+                max,
+                format_len = format_len - 13
+            )
+        );
+        println!("{}", format!("╚═══════════{}╝", "═".repeat(format_len)));
     }
 }
 

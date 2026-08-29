@@ -3,12 +3,13 @@ mod commons;
 use commons::NtSetTimerResolution;
 use commons::show_report;
 
-use nothing_but_data::{Interface, Provider, ProviderConfig};
+use nothing_but_data::{BenchSink, Interface, Provider, ProviderConfig};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+use std::time::Instant;
 
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
@@ -16,21 +17,21 @@ use tokio_util::sync::CancellationToken;
 #[cfg(windows)]
 const WINDOWS_TIMER_TESTING_RESOLUTION_MS: f32 = 0.005;
 
-const STRESS_TEST_DURATION_SECONDS: u64 = 60;
+const STRESS_TEST_DURATION_SECONDS: u64 = 5 * 60;
+const STRESS_TEST_FRQ_MICROS: u64 = 100;
 const STRESS_TEST_CHANNEL_COUNT: usize = 5;
 
+/// This test aims at testing NBD's internal handling of a continuous network flow from multiple producers.
+/// It doesn't take into consideration the transaction time with a Kafka broker (this is dealt with in the "e2e_multi_channel_stress" test).
 #[tokio::test]
 async fn multi_channel_stress_test() {
+
     println!(
         "Stress test will be running for {} seconds.",
         STRESS_TEST_DURATION_SECONDS
     );
 
-    let epoch = Instant::now();
-
     let tx_count = Arc::new(AtomicU64::new(0));
-    let rx_count = Arc::new(AtomicU64::new(0));
-    let ro_count = Arc::new(AtomicUsize::new(0));
 
     #[cfg(windows)]
     let mut timer_resolution_change = false;
@@ -57,10 +58,9 @@ async fn multi_channel_stress_test() {
         }
     }
 
-    let mut dest_addrs: Vec<Arc<SocketAddr>> = Vec::new();
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel(STRESS_TEST_CHANNEL_COUNT * 10_000);
     let token = CancellationToken::new();
+    let mut test_sinks: Vec<BenchSink> = Vec::new();
+    let mut senders = Vec::new();
 
     for i in 1..(STRESS_TEST_CHANNEL_COUNT + 1) {
         let config_test = ProviderConfig {
@@ -68,6 +68,8 @@ async fn multi_channel_stress_test() {
             group: format!("239.255.0.{i}").parse().unwrap(),
             port: 0,
             message_size: 2048,
+            parallel_senders: (1000.0 * 0.01 * (1_000_000.0 / (STRESS_TEST_FRQ_MICROS as f64)))
+                as usize,
             interface: Interface::V4(std::net::Ipv4Addr::UNSPECIFIED),
         };
 
@@ -87,103 +89,109 @@ async fn multi_channel_stress_test() {
 
         assert_ne!(port, 0);
 
-        let provider_tx = tx.clone();
         let listener_token = token.clone();
+        let listener_sink = BenchSink::default();
 
-        dest_addrs.push(
-            Arc::new(format!("239.255.0.{i}:{port}")
-                .parse()
-                .expect("Unable to convert string to SocketAddr.")),
-        );
+        let task_sink = listener_sink.clone();
 
-        tokio::spawn(async move { provider.start_listener(provider_tx, listener_token).await });
+        tokio::spawn(async move { provider.start_listener(task_sink, listener_token).await });
+
+        let task_sink = listener_sink.clone();
+
+        let task_token = token.clone();
+        let mut task_interval =
+            tokio::time::interval(Duration::from_micros(STRESS_TEST_FRQ_MICROS));
+        task_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let task_socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        let task_tx_count = Arc::clone(&tx_count);
+        let mut payload = vec![0xFFu8; 1300];
+        let dst_addr: SocketAddr = format!("239.255.0.{i}:{port}").parse().unwrap();
+        payload.fill(0xFF);
+        let sender = tokio::spawn(async move {
+            let mut latencies: Vec<Duration> = Vec::new();
+
+            loop {
+                tokio::select! {
+                _ = task_token.cancelled() => {
+                    break;
+                }
+                _ = task_interval.tick() => {
+                        let nanos = task_sink.epoch.elapsed().as_nanos() as u64;
+                        payload[..8].copy_from_slice(&nanos.to_be_bytes());
+
+                        let tx_start = Instant::now();
+
+                        match task_socket.send_to(&payload, dst_addr).await {
+                            Ok(_) => {
+                                task_tx_count.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(_) => {}
+                        }
+
+                        let tx_end = Instant::now();
+
+                        latencies.push(tx_end.duration_since(tx_start));
+
+                    }
+                }
+            }
+
+            latencies
+        });
+
+        test_sinks.push(listener_sink);
+        senders.push(sender);
 
         println!("Spawned a listener on : 239.255.0.{i}:{port}");
     }
 
-    let receiver_token = token.clone();
+    tokio::time::sleep(std::time::Duration::from_secs(STRESS_TEST_DURATION_SECONDS)).await;
+    token.cancel();
 
-    let mut interval = tokio::time::interval(Duration::from_micros(100));
-    let sender_socket = UdpSocket::bind("0.0.0.0:20030").await;
+    let mut sender_latencies = Vec::new();
 
-    match sender_socket {
-        Ok(_) => {}
-        Err(ref e) => {
-            println!("Failed to bind socket : {}", &e);
+    for sender in senders {
+        match sender.await {
+            Ok(latencies) => {
+                sender_latencies.extend(latencies);
+            }
+            Err(_) => {
+                println!("Failed to retreive sender latencies");
+            }
         }
     }
 
-    let canceler_token = token.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(STRESS_TEST_DURATION_SECONDS)).await;
-        canceler_token.cancel();
-    });
+    let total_received_bytes: u64 = test_sinks
+        .clone()
+        .into_iter()
+        .map(|s| s.received_bytes.load(Ordering::Relaxed))
+        .sum::<usize>() as u64;
 
-    let task_rx_count = Arc::clone(&rx_count);
-    let task_ro_count = Arc::clone(&ro_count);
+    let total_received_messages: u64 = test_sinks
+        .clone()
+        .into_iter()
+        .map(|s| s.received_messages.load(Ordering::Relaxed))
+        .sum::<u64>() as u64;
 
-    let latencies = tokio::spawn(async move {
-        let mut lats = Vec::new();
-        loop {
-            let loop_rx_count = Arc::clone(&task_rx_count);
-            let loop_ro_count = Arc::clone(&task_ro_count);
-            tokio::select! {
-                _ = receiver_token.cancelled() => break,
-                Some(message) = rx.recv() => {
-                    let ts_rx = Instant::now();
-                    let ts_tx_ns = u64::from_be_bytes(message.payload[..8].try_into().unwrap());
-                    let ts_tx = epoch + Duration::from_nanos(ts_tx_ns);
-                    lats.push(ts_rx.duration_since(ts_tx));
-                    loop_rx_count.fetch_add(1, Ordering::Relaxed);
-                    loop_ro_count.fetch_add(message.payload.len(), Ordering::Relaxed);
-                }
-            }
-        }
-        lats
-    });
-
-    match sender_socket {
-        Ok(socket) => {
-            let sender_token = token.clone();
-
-            let mut payload = vec![0xFFu8; 1300];
-            payload.fill(0xFF);
-
-            loop {
-                tokio::select! {
-                    _ = sender_token.cancelled() => {
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        for dst_addr in &dest_addrs {
-                            let nanos = epoch.elapsed().as_nanos() as u64;
-                            payload[..8].copy_from_slice(&nanos.to_be_bytes());
-                            
-                            match socket.send_to(&payload, **dst_addr).await {
-                                Ok(_) => {
-                                    tx_count.fetch_add(1, Ordering::Relaxed);
-                                }
-                                Err(_) => {}
-                            }
-
-                        }
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            println!("Unexpected failure on sender socket : {}", e);
-        }
-    };
+    let latencies = test_sinks
+        .clone()
+        .into_iter()
+        .flat_map(|s| s.latencies.lock().unwrap().to_vec())
+        .collect();
 
     show_report(
-        &format!("{}-seconds-stress-test", STRESS_TEST_DURATION_SECONDS),
-        latencies.await.expect("Failed to compute test data."),
+        &format!("{}-seconds-multi-stress-test", STRESS_TEST_DURATION_SECONDS),
+        latencies,
         Some(tx_count.load(Ordering::Relaxed)),
-        Some(rx_count.load(Ordering::Relaxed)),
+        Some(total_received_messages),
     );
 
-    let total_received_bytes = ro_count.load(Ordering::Relaxed) as u64;
+    show_report(
+        &format!("{}-seconds-multi-sender-test", STRESS_TEST_DURATION_SECONDS),
+        sender_latencies,
+        None,
+        None,
+    );
 
     println!(
         "Processed a total of {} bytes in {} secs. ({} bytes/s)",

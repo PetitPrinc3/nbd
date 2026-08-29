@@ -3,11 +3,10 @@ mod commons;
 #[cfg(windows)]
 use commons::NtSetTimerResolution;
 
-use nothing_but_data::{Interface, Provider, ProviderConfig};
+use nothing_but_data::{BenchSink, Interface, Provider, ProviderConfig};
 
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
@@ -15,10 +14,11 @@ use tokio_util::sync::CancellationToken;
 #[cfg(windows)]
 const WINDOWS_TIMER_TESTING_RESOLUTION_MS: f32 = 0.5;
 
+const TEST_MESSAGE_COUNT: usize = 3;
+
+/// This test aims at testing NBD's internal latency for a small number of messages to validate the internal processing mechanism
 #[tokio::test]
 async fn minor_latency_test() {
-    let test_message_count = 3;
-
     #[cfg(windows)]
     let mut timer_resolution_change = false;
 
@@ -49,6 +49,7 @@ async fn minor_latency_test() {
         group: "239.255.0.1".parse().unwrap(), // multicast local, portable
         port: 0,                               // laisse l'OS choisir un port libre
         message_size: 2048,
+        parallel_senders: TEST_MESSAGE_COUNT,
         interface: Interface::V4(std::net::Ipv4Addr::UNSPECIFIED),
         // adapte les champs manquants/différents à ta vraie ProviderConfig
     };
@@ -69,32 +70,28 @@ async fn minor_latency_test() {
 
     assert_ne!(port, 0);
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-    let mut horodatages: HashMap<u8, Instant> = HashMap::new();
+    let test_sink = BenchSink::default();
+
     let token = CancellationToken::new();
     let listener_token = token.clone();
+    let listener_sink = test_sink.clone();
 
-    tokio::spawn(async move { provider.start_listener(tx, listener_token).await });
+    tokio::spawn(async move { provider.start_listener(listener_sink, listener_token).await });
 
     let dst_addr: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(239, 255, 0, 1)), port);
 
-    let sender_socket = UdpSocket::bind("0.0.0.0:20020").await;
+    let sender_socket = UdpSocket::bind("0.0.0.0:20000").await;
+
+    let mut payload = vec![0xFFu8; 1300];
+    payload.fill(0xFF);
 
     match sender_socket {
         Ok(socket) => {
-            for i in 0..test_message_count {
-                horodatages.insert(i, Instant::now());
-                match socket.send_to(&[i], dst_addr).await {
-                    Ok(_) => match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
-                        Ok(message) => {
-                            let i = &message.unwrap().payload[0];
-                            let latence = horodatages.remove(i).unwrap().elapsed();
-                            println!("Message n°{i} latency : {latence:?}");
-                        }
-                        Err(_) => {
-                            println!("Timedout...")
-                        }
-                    },
+            for _ in 0..TEST_MESSAGE_COUNT {
+                let nanos = test_sink.epoch.elapsed().as_nanos() as u64;
+                payload[..8].copy_from_slice(&nanos.to_be_bytes());
+                match socket.send_to(&payload, dst_addr).await {
+                    Ok(_) => {}
                     Err(e) => println!("Unexpected failure while sending data : {}", e),
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -106,6 +103,17 @@ async fn minor_latency_test() {
     }
 
     token.cancel();
+
+    for (idx, latency) in test_sink
+        .latencies
+        .lock()
+        .unwrap()
+        .to_vec()
+        .iter()
+        .enumerate()
+    {
+        println!("Latency n° {idx} : {latency:?}");
+    }
 
     #[cfg(windows)]
     unsafe {

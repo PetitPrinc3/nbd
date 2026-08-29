@@ -13,7 +13,7 @@
 ---
 
 Nothing but data is a daemon coded in `Rust`and aiming at providing a high performance connector to send multicast messages to a Kafka borker.  
-It relies on Zero-Copy and MPSC principles in order to provide a fully optimized system for sensitive production environments.
+It relies on Zero-Copy principles in order to provide a fully optimized system suited for sensitive production environments.
 
 It complies with the [ANSSI requirements](https://anssi-fr.github.io/rust-guide/) regarding `Rust` application development.
 
