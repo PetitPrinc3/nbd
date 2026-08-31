@@ -265,18 +265,21 @@ impl ProviderConfig {
                     provider_config.port = default_port;
                 } else if port < 1024 {
                     info!(
-                        "While the `{}.port` parameter is specified, using a port lower than 1023 is not recommended (see https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#Well-known_ports)",
+                        "While the `providers.{}.port` parameter is specified, using a port lower than 1023 is not recommended (see https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#Well-known_ports)",
                         &idx
                     );
                     provider_config.port = port;
                 } else if port > 49151 {
                     info!(
-                        "While the `{}.port` parameter is specified, using a port higher than 49152 is not recommended (see https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#Dynamic,_private_or_ephemeral_ports)",
+                        "While the `providers.{}.port` parameter is specified, using a port higher than 49152 is not recommended (see https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#Dynamic,_private_or_ephemeral_ports)",
                         &idx
                     );
                     provider_config.port = port;
                 } else {
-                    debug!("The `{}.port` parameter is well configured.", &idx);
+                    debug!(
+                        "The `providers.{}.port` parameter is well configured.",
+                        &idx
+                    );
                     provider_config.port = port;
                 }
             }
@@ -321,6 +324,14 @@ impl ProviderConfig {
                         "This is most likely a missconfiguration and will cause data loss when receiving packets longer than the `nbd.socket_buffer_size`."
                     );
                     provider_config.message_size = value;
+                } else if value > 65_507 {
+                    warn!(
+                        "The `providers.{}.message_size` parameter is bigger than the maximum UDP datagram size ({} > {}) and was replaced by {}. (see https://en.wikipedia.org/wiki/User_Datagram_Protocol#UDP_datagram_structure)",
+                        &idx, value, 65_507, 65_507,
+                    );
+                    warn!(
+                        "This is most likely a missconfiguration and may cause issues if the total allocated space is bigger than the available memory. A default value of 1 500 is recommended."
+                    );
                 } else {
                     debug!(
                         "The `providers.{}.message_size` parameter is configured correctly.",
@@ -355,6 +366,11 @@ impl ProviderConfig {
                         "The `providers.{}.parallel_senders` parameter seems low ({}). Use of the `Little's law` is encouraged to determine a coherent value.",
                         &idx, value
                     )
+                } else {
+                    debug!(
+                        "The `providers.{}.parallel_senders` parameter is configured correctly.",
+                        &idx
+                    );
                 };
 
                 provider_config.parallel_senders = value;
@@ -390,7 +406,7 @@ impl From<RawProducerConfig> for ProducerConfig {
 
         match producer_config.broker.to_socket_addrs() {
             Ok(_) => {
-                debug!("Valid ip/port combination.");
+                debug!("The `kafka.broker` parameter is a valid ip/port combination.");
             }
             Err(_) => {
                 error!(
@@ -571,7 +587,7 @@ impl TryFrom<RawMetricsConfig> for MetricsConfig {
 
         match raw_metrics_config.port {
             Some(port) => {
-                debug!("The `metrics.port` parameter is a valid ip address.");
+                debug!("The `metrics.port` parameter is a valid ip port.");
                 metrics_config.port = port;
             }
             None => {

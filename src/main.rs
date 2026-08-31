@@ -69,6 +69,8 @@ async fn main() -> Result<(), NbdError> {
         }
     };
 
+    info!("Starting NBD...");
+
     let raw_config = RawConfig::from_path(&config_path)?;
     let config = Config::try_from(raw_config)?;
 
@@ -135,7 +137,7 @@ async fn main() -> Result<(), NbdError> {
         .set("max.in.flight.requests.per.connection", "5")
         .set("queue.buffering.max.messages", "100000")
         .set("enable.idempotence", "true")
-        .set("linger.ms", "1")
+        .set("linger.ms", "0")
         .set("acks", "all")
         .create::<rdkafka::producer::FutureProducer>()
     {
@@ -194,6 +196,8 @@ async fn main() -> Result<(), NbdError> {
             Ok(())
         });
     }
+
+    info!("NBD started successfully and is ready to accept incoming traffic.");
 
     #[cfg(unix)]
     tokio::select! {

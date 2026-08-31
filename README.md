@@ -12,8 +12,8 @@
 
 ---
 
-Nothing but data is a daemon coded in `Rust`and aiming at providing a high performance connector to send multicast messages to a Kafka borker.  
-It relies on Zero-Copy principles in order to provide a fully optimized system suited for sensitive production environments.
+Nothing but data is a light, high-performance and secure data pipeline written in `Rust`, designed to ingest real-time UDP multicast traffic and efficiently relay it to an Apache Kafka broker.  
+It relies on multi-threading and zero-copy principles in order to provide a fully optimized system suited for sensitive production environments, inducing sub-millisecond latency.
 
 It complies with the [ANSSI requirements](https://anssi-fr.github.io/rust-guide/) regarding `Rust` application development.
 

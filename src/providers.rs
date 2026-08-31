@@ -30,7 +30,6 @@ pub struct Provider {
     buff_size: usize,
     parallel_senders: usize,
     socket: Option<Socket>,
-    //pub producer: Option<FutureProducer>,
 }
 
 impl From<&ProviderConfig> for Provider {
@@ -46,7 +45,6 @@ impl From<&ProviderConfig> for Provider {
             buff_size: config.message_size,
             parallel_senders: config.parallel_senders,
             socket: None,
-            //producer: None,
         }
     }
 }
@@ -160,7 +158,7 @@ impl Provider {
                         warn!("Listener on {} was cancelled.", self.group);
                         break Ok(());
                     }
-                    stat = listener.recv_buf(&mut buf), if in_flight.len() < self.parallel_senders => {
+                    stat = listener.recv_buf(&mut buf), if !cancel_token.is_cancelled() && in_flight.len() < self.parallel_senders => {
                         match stat {
                             Ok(len) => {
                                 if len == 0 {
