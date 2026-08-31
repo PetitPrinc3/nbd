@@ -3,21 +3,23 @@ mod commons;
 use commons::NtSetTimerResolution;
 use commons::show_report;
 
-use nothing_but_data::{Interface, Provider, ProviderConfig};
+use nothing_but_data::{BenchSink, Interface, Provider, ProviderConfig};
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(windows)]
-const WINDOWS_TIMER_TESTING_RESOLUTION_MS: f32 = 0.5;
+const WINDOWS_TIMER_TESTING_RESOLUTION_MS: f32 = 0.005;
 
-const SPIKE_TEST_DURATION_SECONDS: u64 = 5;
+const SPIKE_TEST_DURATION_SECONDS: u64 = 10;
+const SPIKE_TEST_FRQ_MICROS: u64 = 1;
 
+/// This test aims at testing NBD's internal handling of a short spike in network flow from one producer.
+/// It doesn't take into consideration the transaction time with a Kafka broker (this is dealt with in the "e2e_spike" test).
 #[tokio::test]
 async fn spike_test() {
     println!(
@@ -26,8 +28,6 @@ async fn spike_test() {
     );
 
     let mut tx_count = AtomicU64::new(0);
-    let rx_count = Arc::new(AtomicU64::new(0));
-    let ro_count = Arc::new(AtomicUsize::new(0));
 
     #[cfg(windows)]
     let mut timer_resolution_change = false;
@@ -54,22 +54,21 @@ async fn spike_test() {
         }
     }
 
-    let epoch = Instant::now();
-
     let config_test = ProviderConfig {
         topic: "test".to_string(),
         group: "239.255.0.1".parse().unwrap(),
         port: 0,
         message_size: 2048,
+        parallel_senders: 50,
         interface: Interface::V4(std::net::Ipv4Addr::UNSPECIFIED),
     };
 
     let mut provider = Provider::from(&config_test);
-    provider.subscribe(&(4 * 1024 * 1024)).unwrap();
+    provider.subscribe(&(2 * 1024 * 1024)).unwrap();
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(10000);
     let token = CancellationToken::new();
     let listener_token = token.clone();
+    let test_sink = BenchSink::default();
 
     let port = match provider.get_socket() {
         Ok(ref socket) => match socket.local_addr() {
@@ -84,14 +83,20 @@ async fn spike_test() {
 
     assert_ne!(port, 0);
 
-    tokio::spawn(async move { provider.start_listener(tx, listener_token).await });
+    let listener_sink = test_sink.clone();
 
-    let receiver_token = token.clone();
+    tokio::spawn(async move { provider.start_listener(listener_sink, listener_token).await });
 
     let dst_addr: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(239, 255, 0, 1)), port);
-    let sender_socket = UdpSocket::bind("0.0.0.0:20010").await;
+    let mut interval = tokio::time::interval(Duration::from_micros(SPIKE_TEST_FRQ_MICROS));
+    let sender_socket = UdpSocket::bind("0.0.0.0:20020").await;
 
-    assert_eq!(sender_socket.is_ok(), true);
+    match sender_socket {
+        Ok(_) => {}
+        Err(ref e) => {
+            println!("Failed to bind socket : {}", &e);
+        }
+    }
 
     let canceler_token = token.clone();
     tokio::spawn(async move {
@@ -99,41 +104,17 @@ async fn spike_test() {
         canceler_token.cancel();
     });
 
-    let task_rx_count = Arc::clone(&rx_count);
-    let task_ro_count = Arc::clone(&ro_count);
-
-    let latencies = tokio::spawn(async move {
-        let mut lats = Vec::new();
-        loop {
-            let loop_rx_count = Arc::clone(&task_rx_count);
-            let loop_ro_count = Arc::clone(&task_ro_count);
-            tokio::select! {
-                _ = receiver_token.cancelled() => break,
-                Some(message) = rx.recv() => {
-                    let ts_rx = Instant::now();
-                    let ts_tx_ns = u64::from_be_bytes(message.payload[..8].try_into().unwrap());
-                    let ts_tx = epoch + Duration::from_nanos(ts_tx_ns);
-                    lats.push(ts_rx.duration_since(ts_tx));
-                    loop_rx_count.fetch_add(1, Ordering::Relaxed);
-                    loop_ro_count.fetch_add(message.payload.len(), Ordering::Relaxed);
-                }
-            }
-        }
-        lats
-    });
-
-    let mut interval = tokio::time::interval(Duration::from_micros(1));
-
     match sender_socket {
         Ok(socket) => {
             let sender_token = token.clone();
+
             let mut payload = vec![0xFFu8; 1300];
             payload.fill(0xFF);
 
             loop {
                 interval.tick().await;
 
-                let nanos = epoch.elapsed().as_nanos() as u64;
+                let nanos = test_sink.epoch.elapsed().as_nanos() as u64;
                 payload[..8].copy_from_slice(&nanos.to_be_bytes());
 
                 tokio::select! {
@@ -147,14 +128,18 @@ async fn spike_test() {
         }
     };
 
+    let total_received_bytes: u64 = test_sink
+        .received_bytes
+        .load(Ordering::Relaxed)
+        .try_into()
+        .unwrap();
+
     show_report(
         &format!("{}-seconds-spike-test", SPIKE_TEST_DURATION_SECONDS),
-        latencies.await.expect("Failed to compute test data."),
+        test_sink.latencies.lock().unwrap().to_vec(),
         Some(*tx_count.get_mut()),
-        Some(rx_count.load(Ordering::Relaxed)),
+        Some(test_sink.received_messages.load(Ordering::Relaxed)),
     );
-
-    let total_received_bytes = ro_count.load(Ordering::Relaxed) as u64;
 
     println!(
         "Processed a total of {} bytes in {} secs. ({} bytes/s)",

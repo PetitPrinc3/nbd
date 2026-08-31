@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-use crate::message::Message;
-
 #[derive(Error, Debug)]
 pub enum NbdError {
     #[cfg(feature = "metrics-exporter")]
@@ -16,9 +14,6 @@ pub enum NbdError {
 
     #[error("Network error : {0}")]
     Network(#[from] std::io::Error),
-
-    #[error("Message transmission error : {0}")]
-    Transmission(#[from] tokio::sync::mpsc::error::SendError<Message>),
 
     #[error("Toml error : {}", .0.message())]
     Toml(#[from] toml::de::Error),

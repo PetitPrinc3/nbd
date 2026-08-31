@@ -3,16 +3,13 @@
 // The No Bullshit Daemon.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use rdkafka::config::ClientConfig;
-use rdkafka::producer::{FutureRecord, Producer};
-use rdkafka::util::Timeout;
+use rdkafka::producer::Producer;
 
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
@@ -24,7 +21,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 
 use clap::Parser;
 
-use nothing_but_data::{Config, Message, NbdError, Provider, RawConfig};
+use nothing_but_data::{Config, NbdError, Provider, RawConfig};
 
 mod args;
 use args::Cli;
@@ -72,6 +69,8 @@ async fn main() -> Result<(), NbdError> {
         }
     };
 
+    info!("Starting NBD...");
+
     let raw_config = RawConfig::from_path(&config_path)?;
     let config = Config::try_from(raw_config)?;
 
@@ -111,22 +110,71 @@ async fn main() -> Result<(), NbdError> {
 
     let mut listener_tasks = JoinSet::<Result<(), NbdError>>::new();
 
-    let (tx, mut rx) = mpsc::channel::<Message>(config.nbd.parallel_listeners as usize);
-
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     let cancel_token = CancellationToken::new();
 
-    for candidate in config.provider {
-        let task_tx = tx.clone();
+    let providers: Vec<Provider> = config.provider.iter().map(Provider::from).collect();
+
+    info!(
+        "Connecting to the Kafka broker at {} ...",
+        config.kafka.broker
+    );
+
+    let kafka_producer = match ClientConfig::new()
+        .set("bootstrap.servers", &config.kafka.broker)
+        .set(
+            "message.timeout.ms",
+            config.kafka.message_timeout.to_string(),
+        )
+        .set(
+            "message.send.max.retries",
+            config.kafka.message_retries.to_string(),
+        )
+        .set("compression.type", "lz4")
+        .set("max.in.flight.requests.per.connection", "5")
+        .set("queue.buffering.max.messages", "100000")
+        .set("enable.idempotence", "true")
+        .set("linger.ms", "0")
+        .set("acks", "all")
+        .create::<rdkafka::producer::FutureProducer>()
+    {
+        Ok(producer) => {
+            match producer
+                .client()
+                .fetch_metadata(None, Duration::from_millis(config.kafka.connection_timeout))
+            {
+                Ok(metadata) => {
+                    info!(
+                        "Successfully connected to the Kafka broker. (found {} brokers)",
+                        metadata.brokers().len()
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to reach the Kafka broker.");
+                    cancel_token.cancel();
+                    return Err(NbdError::Kafka(e));
+                }
+            };
+
+            producer
+        }
+        Err(e) => {
+            error!("A fatal error occured : {}", e);
+            cancel_token.cancel();
+            return Err(NbdError::Kafka(e));
+        }
+    };
+
+    for mut provider in providers {
         let task_tk = cancel_token.clone();
+        let task_producer = kafka_producer.clone();
 
         listener_tasks.spawn(async move {
-            let mut provider: Provider = Provider::from(&candidate);
             match provider.subscribe(&config.nbd.socket_buffer_size) {
-                Ok(()) => match provider.start_listener(task_tx, task_tk).await {
+                Ok(()) => match provider.start_listener(task_producer, task_tk).await {
                     Ok(_) => {}
                     Err(e) => {
                         error!(
@@ -149,129 +197,12 @@ async fn main() -> Result<(), NbdError> {
         });
     }
 
-    let consumer_tk = cancel_token.clone();
-    let consumer_task = tokio::spawn(async move {
-        info!(
-            "Connecting to the Kafka broker at {} ...",
-            config.kafka.broker
-        );
-
-        (match ClientConfig::new()
-            .set("bootstrap.servers", &config.kafka.broker)
-            .set(
-                "message.timeout.ms",
-                config.kafka.message_timeout.to_string(),
-            )
-            .set(
-                "message.send.max.retries",
-                config.kafka.message_retries.to_string(),
-            )
-            .set("compression.type", "lz4")
-            .set("max.in.flight.requests.per.connection", "5")
-            .set("queue.buffering.max.messages", "100000")
-            .set("enable.idempotence", "true")
-            .set("linger.ms", "1")
-            .set("acks", "all")
-            .create::<rdkafka::producer::FutureProducer>()
-        {
-            Ok(producer) => {
-                match producer
-                    .client()
-                    .fetch_metadata(None, Duration::from_millis(config.kafka.connection_timeout))
-                {
-                    Ok(metadata) => {
-                        info!(
-                            "Successfully connected to the Kafka broker. (found {} brokers)",
-                            metadata.brokers().len()
-                        );
-                        Ok(())
-                    }
-                    Err(e) => {
-                        error!("Failed to reach the Kafka broker.");
-                        consumer_tk.cancel();
-                        Err(NbdError::Kafka(e))
-                    }
-                }?;
-
-                let semaphore = Arc::new(Semaphore::new(config.nbd.parallel_senders as usize));
-
-                while let Some(message) = rx.recv().await {
-                    match semaphore.clone().acquire_owned().await {
-                        Ok(permit) => {
-                            let task_producer = producer.clone();
-
-                            tokio::spawn(async move {
-                                let record: FutureRecord<[u8], [u8]> =
-                                    FutureRecord::to(&message.topic)
-                                        .payload(message.payload.as_ref());
-
-                                match task_producer
-                                    .send(record, Timeout::After(Duration::from_millis(100)))
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        #[cfg(feature = "metrics-exporter")]
-                                        metrics::counter!("nbd_kafka_sent_total", "topic" => message.topic.clone()).increment(1);
-
-                                        debug!(
-                                            "Successfully sent some message on topic {} !",
-                                            &message.topic
-                                        );
-                                    }
-                                    Err((e, _)) => {
-                                        #[cfg(feature = "metrics-exporter")]
-                                        metrics::counter!("nbd_errors_kafka_total", "topic" => message.topic.clone()).increment(1);
-
-                                        warn!(
-                                            "Failed to send one message on topic {} : {}",
-                                            &message.topic, e
-                                        )
-                                    }
-                                };
-
-                                drop(permit)
-                            });
-                        }
-                        Err(e) => {
-                            #[cfg(feature = "metrics-exporter")]
-                            metrics::counter!("nbd_errors_kafka_total", "topic" => message.topic.clone()).increment(1);
-
-                            warn!(
-                                "Failed to acquire an async permit to send message on topic {} : {}",
-                                &message.topic, e
-                            );
-                        }
-                    };
-                }
-
-                match semaphore.acquire_many(config.nbd.parallel_senders).await {
-                    Ok(_) => debug!("All async permits were successfully freed."),
-                    Err(e) => {
-                        warn!(
-                            "Not all senders returned, some sending operations may be abruptly stopped : {}",
-                            e
-                        );
-                    }
-                };
-
-                producer.flush(Duration::from_secs(3))?;
-
-                consumer_tk.cancel();
-
-                Ok(())
-            }
-            Err(e) => {
-                error!("A fatal error occured : {}", e);
-                consumer_tk.cancel();
-                Err(NbdError::Kafka(e))
-            }
-        }) as Result<(), NbdError>
-    });
+    info!("NBD started successfully and is ready to accept incoming traffic.");
 
     #[cfg(unix)]
     tokio::select! {
-        _ = ctrl_c => { info!("Received Ctrl+C signal, stopping NBD."); cancel_token.cancel(); drop(tx) }
-        _ = sigterm.recv() => { info!("Received SIGTERM signal, stopping NBD."); cancel_token.cancel(); drop(tx) }
+        _ = ctrl_c => { info!("Received Ctrl+C signal, stopping NBD."); cancel_token.cancel(); }
+        _ = sigterm.recv() => { info!("Received SIGTERM signal, stopping NBD."); cancel_token.cancel(); }
         _ = cancel_token.cancelled() => {}
         Some(res) = listener_tasks.join_next() => {
             match res {
@@ -282,7 +213,6 @@ async fn main() -> Result<(), NbdError> {
                     error!("A fatal error occured with one or more listener : {}", e);
                     error!("NBD will now try to stop gracefully.");
                     cancel_token.cancel();
-                    drop(tx);
                 }
                 Err(e) => {
                     if e.is_panic() {
@@ -291,7 +221,6 @@ async fn main() -> Result<(), NbdError> {
                         warn!("A listener was cancelled : {}", e);
                     }
                     cancel_token.cancel();
-                    drop(tx);
                 }
             }
         }
@@ -299,7 +228,7 @@ async fn main() -> Result<(), NbdError> {
 
     #[cfg(windows)]
     tokio::select! {
-        _ = ctrl_c => { info!("Received Ctrl+C signal, stopping NBD."); cancel_token.cancel(); drop(tx) }
+        _ = ctrl_c => { info!("Received Ctrl+C signal, stopping NBD."); cancel_token.cancel();  }
         _ = cancel_token.cancelled() => {}
         Some(res) = listener_tasks.join_next() => {
             match res {
@@ -310,7 +239,6 @@ async fn main() -> Result<(), NbdError> {
                     error!("A fatal error occured with one or more listener : {}", e);
                     error!("NBD will now try to stop gracefully.");
                     cancel_token.cancel();
-                    drop(tx);
                 }
                 Err(e) => {
                     if e.is_panic() {
@@ -319,13 +247,12 @@ async fn main() -> Result<(), NbdError> {
                         warn!("A listener was cancelled : {}", e);
                     }
                     cancel_token.cancel();
-                    drop(tx);
                 }
             }
         }
     }
 
-    match task_termination(listener_tasks, consumer_task).await {
+    match task_termination(listener_tasks).await {
         Ok(_) => {
             info!("NBD exited gracefully.");
             return Ok(());
@@ -339,33 +266,16 @@ async fn main() -> Result<(), NbdError> {
 
 async fn task_termination(
     mut listener_tasks: tokio::task::JoinSet<Result<(), NbdError>>,
-    consumer_task: tokio::task::JoinHandle<Result<(), NbdError>>,
 ) -> Result<(), NbdError> {
     let listener_termination_status = tokio::time::timeout(Duration::from_secs(5), async {
         while listener_tasks.join_next().await.is_some() {}
     })
     .await;
 
-    let consumer_termination_status =
-        tokio::time::timeout(Duration::from_secs(5), consumer_task).await;
-
     if listener_termination_status.is_err() {
         error!("Some providers failed to stop correctly.");
-        if consumer_termination_status.is_err() {
-            error!("The consumer task failed to stop correctly.");
-            return Err(NbdError::Termination(String::from(
-                "The consumer task and some providers failed to stop correctly.",
-            )));
-        }
         return Err(NbdError::Termination(String::from(
             "Some providers failed to stop correctly.",
-        )));
-    }
-
-    if consumer_termination_status.is_err() {
-        error!("The consumer task failed to stop correctly.");
-        return Err(NbdError::Termination(String::from(
-            "The consumer task failed to stop correctly.",
         )));
     }
 

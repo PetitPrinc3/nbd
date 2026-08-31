@@ -43,6 +43,7 @@ pub struct RawProviderConfig {
     pub group: IpAddr,
     pub port: Option<u16>,
     pub message_size: Option<usize>,
+    pub parallel_senders: Option<usize>,
     pub interface: Option<Interface>,
 }
 
@@ -56,8 +57,6 @@ pub struct RawProducerConfig {
 
 #[derive(Deserialize, Default)]
 pub struct RawNbdConfig {
-    pub parallel_senders: Option<u32>,
-    pub parallel_listeners: Option<u32>,
     pub socket_buffer_size: Option<usize>,
     pub verbosity: Option<VerbosityLevels>,
 }
@@ -126,6 +125,7 @@ pub struct ProviderConfig {
     pub group: IpAddr,
     pub port: u16,
     pub message_size: usize,
+    pub parallel_senders: usize,
     pub interface: Interface,
 }
 
@@ -140,6 +140,7 @@ impl ProviderConfig {
             group: raw_provider_config.group,
             port: 0,
             message_size: 0,
+            parallel_senders: 0,
             interface: Interface::V4(Ipv4Addr::UNSPECIFIED),
         };
 
@@ -264,18 +265,21 @@ impl ProviderConfig {
                     provider_config.port = default_port;
                 } else if port < 1024 {
                     info!(
-                        "While the `{}.port` parameter is specified, using a port lower than 1023 is not recommended (see https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#Well-known_ports)",
+                        "While the `providers.{}.port` parameter is specified, using a port lower than 1023 is not recommended (see https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#Well-known_ports)",
                         &idx
                     );
                     provider_config.port = port;
                 } else if port > 49151 {
                     info!(
-                        "While the `{}.port` parameter is specified, using a port higher than 49152 is not recommended (see https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#Dynamic,_private_or_ephemeral_ports)",
+                        "While the `providers.{}.port` parameter is specified, using a port higher than 49152 is not recommended (see https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#Dynamic,_private_or_ephemeral_ports)",
                         &idx
                     );
                     provider_config.port = port;
                 } else {
-                    debug!("The `{}.port` parameter is well configured.", &idx);
+                    debug!(
+                        "The `providers.{}.port` parameter is well configured.",
+                        &idx
+                    );
                     provider_config.port = port;
                 }
             }
@@ -320,6 +324,14 @@ impl ProviderConfig {
                         "This is most likely a missconfiguration and will cause data loss when receiving packets longer than the `nbd.socket_buffer_size`."
                     );
                     provider_config.message_size = value;
+                } else if value > 65_507 {
+                    warn!(
+                        "The `providers.{}.message_size` parameter is bigger than the maximum UDP datagram size ({} > {}) and was replaced by {}. (see https://en.wikipedia.org/wiki/User_Datagram_Protocol#UDP_datagram_structure)",
+                        &idx, value, 65_507, 65_507,
+                    );
+                    warn!(
+                        "This is most likely a missconfiguration and may cause issues if the total allocated space is bigger than the available memory. A default value of 1 500 is recommended."
+                    );
                 } else {
                     debug!(
                         "The `providers.{}.message_size` parameter is configured correctly.",
@@ -335,6 +347,40 @@ impl ProviderConfig {
                     &idx, default_message_size,
                 );
                 provider_config.message_size = default_message_size;
+            }
+        }
+
+        match raw_provider_config.parallel_senders {
+            Some(value) => {
+                if value == 0 {
+                    error!(
+                        "The `providers.{}.parallel_senders` parameter can't be 0 and should at least be 1. Use of the `Little's law` is encouraged to determine a coherent value.",
+                        &idx
+                    );
+                    return Err(NbdError::Config(format!(
+                        "The `providers.{}.parallel_senders` parameter can't be 0.",
+                        idx,
+                    )));
+                } else if value < 10 {
+                    warn!(
+                        "The `providers.{}.parallel_senders` parameter seems low ({}). Use of the `Little's law` is encouraged to determine a coherent value.",
+                        &idx, value
+                    )
+                } else {
+                    debug!(
+                        "The `providers.{}.parallel_senders` parameter is configured correctly.",
+                        &idx
+                    );
+                };
+
+                provider_config.parallel_senders = value;
+            }
+            None => {
+                warn!(
+                    "The `providers.{}.parallel_senders` parameter is unspecified and was replaced by a default value of `30`.",
+                    &idx
+                );
+                provider_config.parallel_senders = 30;
             }
         }
 
@@ -360,7 +406,7 @@ impl From<RawProducerConfig> for ProducerConfig {
 
         match producer_config.broker.to_socket_addrs() {
             Ok(_) => {
-                debug!("Valid ip/port combination.");
+                debug!("The `kafka.broker` parameter is a valid ip/port combination.");
             }
             Err(_) => {
                 error!(
@@ -439,8 +485,6 @@ impl From<RawProducerConfig> for ProducerConfig {
 }
 
 pub struct NbdConfig {
-    pub parallel_senders: u32,
-    pub parallel_listeners: u32,
     pub socket_buffer_size: usize,
     pub verbosity: VerbosityLevels,
 }
@@ -449,69 +493,8 @@ impl TryFrom<RawNbdConfig> for NbdConfig {
     type Error = NbdError;
     fn try_from(raw_nbd_config: RawNbdConfig) -> Result<Self, Self::Error> {
         let mut nbd_config = NbdConfig {
-            parallel_senders: 0,
-            parallel_listeners: 0,
             socket_buffer_size: 0,
             verbosity: VerbosityLevels::Info,
-        };
-
-        match raw_nbd_config.parallel_senders {
-            Some(value) => {
-                if value == 0 {
-                    error!(
-                        "The `nbd.parallel_senders` parameter can't be 0 and should at least be 1. A default value of 1000 is recommended."
-                    );
-                    return Err(NbdError::Config(String::from(
-                        "The `nbd.parallel_senders` parameter can't be 0.",
-                    )));
-                } else if value < 100 {
-                    warn!(
-                        "The `nbd.parallel_senders` parameter is low ({}). It is recommended to increase it to at least 100, depending on your infrastructure and server capabilities.",
-                        value
-                    )
-                };
-
-                nbd_config.parallel_senders = value;
-            }
-            None => {
-                warn!(
-                    "The `nbd.parallel_senders` parameter is unspecified and was replaced by a default value of `1000`."
-                );
-                nbd_config.parallel_senders = 1000;
-            }
-        }
-
-        match raw_nbd_config.parallel_listeners {
-            Some(value) => {
-                if value == 0 {
-                    error!(
-                        "The `nbd.parallel_listeners` parameter can't be 0 and should at least be 1. A default value of 1000 is recommended."
-                    );
-                    return Err(NbdError::Config(String::from(
-                        "The `nbd.parallel_listeners` parameter can't be 0.",
-                    )));
-                } else if value < 1000 {
-                    warn!(
-                        "The `nbd.parallel_listeners` parameter is low ({}). It is recommended to increase it to at least 1000, depending on your infrastructure and server capabilities.",
-                        value
-                    )
-                };
-
-                nbd_config.parallel_listeners = value;
-            }
-            None => {
-                warn!(
-                    "The `nbd.parallel_listeners` parameter is unspecified and was replaced by a default value of `10 000`."
-                );
-                nbd_config.parallel_listeners = 10_000;
-            }
-        }
-
-        if nbd_config.parallel_listeners <= nbd_config.parallel_senders {
-            warn!(
-                "The `nbd.parallel_listeners` parameter is lower than the `config.nbd.parallel_senders` which doesn't make sense  ({} <= {}). The software should be able to receive messages faster than it sends them as to be able to back pressure the network traffic.",
-                nbd_config.parallel_listeners, nbd_config.parallel_senders,
-            )
         };
 
         match raw_nbd_config.socket_buffer_size {
@@ -604,7 +587,7 @@ impl TryFrom<RawMetricsConfig> for MetricsConfig {
 
         match raw_metrics_config.port {
             Some(port) => {
-                debug!("The `metrics.port` parameter is a valid ip address.");
+                debug!("The `metrics.port` parameter is a valid ip port.");
                 metrics_config.port = port;
             }
             None => {
