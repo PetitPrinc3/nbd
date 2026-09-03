@@ -1,3 +1,15 @@
+//! Message delivery abstractions and implementations.
+//!
+//! This module defines the [`MessageSink`] trait, which decouples the UDP multicast
+//! receiver ([`Provider`](crate::providers::Provider)) from the message destination.
+//! This enables zero-cost in-memory benchmarking without a Kafka broker.
+//!
+//! ## Implementations
+//!
+//! - [`FutureProducer`](rdkafka::producer::FutureProducer) — Production sink delivering messages to Kafka.
+//! - [`BenchSink`] — In-memory sink for internal latency benchmarking with nanosecond timestamps.
+//! - [`IPerfSink`] — Mock sink parsing standard iperf UDP packets for packet loss and latency analysis.
+
 use bytes::Bytes;
 
 use std::sync::{Arc, Mutex};
@@ -11,6 +23,15 @@ use crate::errors::NbdError;
 
 const UNIX_EPOCH: SystemTime = SystemTime::UNIX_EPOCH;
 
+/// Trait abstracting the delivery of a message payload to a destination.
+///
+/// Implementations must be `Clone + Send + 'static` so they can be shared across
+/// concurrent async tasks in the [`Provider`](crate::providers::Provider) receive loop.
+///
+/// # Arguments
+///
+/// * `topic` — The Kafka topic (or logical channel) to deliver the message to.
+/// * `payload` — The raw message bytes, produced via zero-copy `BytesMut::split_to().freeze()`.
 pub trait MessageSink: Clone + Send + 'static {
     fn send(
         &self,
@@ -19,7 +40,13 @@ pub trait MessageSink: Clone + Send + 'static {
     ) -> impl std::future::Future<Output = Result<(), NbdError>> + Send;
 }
 
-/// This is the MessageSink used to send messages to the Kafka broker.
+/// Production [`MessageSink`] implementation that delivers messages to a Kafka broker
+/// via `rdkafka::FutureProducer`.
+///
+/// Messages are sent with a 100ms delivery timeout. When the `metrics-exporter` feature
+/// is enabled, end-to-end latency is computed by extracting the transmit timestamp from
+/// payload bytes `[4..12]` (iperf-compatible header: `u32` seconds + `u32` microseconds)
+/// and recording the delta in the `nbd_e2e_latency` Prometheus histogram.
 impl MessageSink for FutureProducer {
     async fn send(&self, topic: Arc<str>, payload: Bytes) -> Result<(), NbdError> {
         let record: FutureRecord<[u8], [u8]> = FutureRecord::to(&topic).payload(&payload);
@@ -48,7 +75,13 @@ impl MessageSink for FutureProducer {
     }
 }
 
-/// This is the MessageSink used for bencharking the software's internal latencies.
+/// In-memory [`MessageSink`] for benchmarking the internal pipeline latency.
+///
+/// Expects payloads with an 8-byte big-endian nanosecond timestamp in the first bytes,
+/// representing the elapsed time since [`epoch`](BenchSink::epoch).
+///
+/// Uses lock-free atomic counters (`Relaxed` ordering) on the hot path for message/byte
+/// counting, and a `Mutex<Vec<Duration>>` for latency recording.
 #[derive(Clone)]
 pub struct BenchSink {
     pub epoch: Instant,
@@ -87,7 +120,15 @@ impl MessageSink for BenchSink {
     }
 }
 
-/// This is the MessageSink used to benchmark the software's latency using iperf
+/// [`MessageSink`] for benchmarking with external [iperf](https://iperf.fr/) UDP streams.
+///
+/// Parses the standard iperf UDP packet header (12 bytes):
+/// - Bytes `[0..4]`: `u32` packet sequence number (big-endian)
+/// - Bytes `[4..8]`: `u32` transmit timestamp seconds (big-endian)
+/// - Bytes `[8..12]`: `u32` transmit timestamp microseconds (big-endian)
+///
+/// Tracks sequence numbers for out-of-order and packet loss detection.
+/// Rejects packets shorter than 12 bytes with [`NbdError::InvalidPacket`].
 #[derive(Clone)]
 pub struct IPerfSink {
     pub state: Arc<Mutex<IPerfSinkState>>,

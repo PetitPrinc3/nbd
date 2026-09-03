@@ -1,6 +1,17 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::mem_forget)]
-// The No Bullshit Daemon.
+//! NBD daemon entry point.
+//!
+//! Orchestrates the full application lifecycle:
+//! 1. Parse CLI arguments ([`Cli`])
+//! 2. Initialize dynamic log filtering via `tracing_subscriber::reload`
+//! 3. Install a custom panic hook that routes panics to structured `tracing::error!` logs
+//! 4. Parse and validate the TOML configuration ([`RawConfig`] → [`Config`])
+//! 5. Start the optional Prometheus metrics exporter (feature-gated)
+//! 6. Pre-flight Kafka broker connectivity check via `fetch_metadata`
+//! 7. Spawn one async listener task per provider in a [`JoinSet`]
+//! 8. Monitor signals (Ctrl+C, SIGTERM on Unix) and task health for graceful shutdown
+//! 9. Drain all in-flight tasks with a 5-second timeout via [`task_termination`]
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -264,6 +275,10 @@ async fn main() -> Result<(), NbdError> {
     }
 }
 
+/// Drains all remaining listener tasks with a 5-second timeout.
+///
+/// Waits for every task in the [`JoinSet`] to complete. If any task is still
+/// running after 5 seconds, returns [`NbdError::Termination`].
 async fn task_termination(
     mut listener_tasks: tokio::task::JoinSet<Result<(), NbdError>>,
 ) -> Result<(), NbdError> {

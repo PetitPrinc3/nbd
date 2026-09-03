@@ -23,4 +23,4 @@ jobs:
     - name: Format
       run: cargo fmt
     - name: Build
-      run: cargo build
+      run: cargo build --release --all-features

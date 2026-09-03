@@ -1,3 +1,29 @@
+//! Core UDP multicast ingestion engine.
+//!
+//! This module configures OS-level multicast sockets (IGMP/MLD) using [`socket2`],
+//! binds to specified network interfaces, and runs a zero-copy asynchronous receive
+//! loop that streams incoming UDP packets to any [`MessageSink`] implementation.
+//!
+//! ## Zero-copy buffer strategy
+//!
+//! The receive loop uses [`bytes::BytesMut`] as its buffer. When a datagram arrives,
+//! the consumed bytes are split off via `split_to(len).freeze()`, producing a
+//! reference-counted, immutable [`Bytes`](bytes::Bytes) handle — **no payload memory
+//! is copied**. The buffer is re-allocated only when remaining capacity drops below
+//! the configured `message_size`.
+//!
+//! ## Bounded concurrency
+//!
+//! In-flight sink deliveries are tracked in a [`FuturesUnordered`] collection. The
+//! receive branch of the `tokio::select!` loop is disabled when `in_flight.len() >=
+//! parallel_senders`, applying backpressure to prevent unbounded task accumulation.
+//!
+//! ## Graceful shutdown
+//!
+//! On [`CancellationToken`](tokio_util::sync::CancellationToken) cancellation, the
+//! listener only exits once all in-flight deliveries have completed, ensuring no
+//! messages are silently dropped.
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -16,10 +42,21 @@ use crate::config::{Interface, ProviderConfig};
 use crate::errors::NbdError;
 use crate::sinks::MessageSink;
 
+/// Headroom multiplier for initial buffer allocation.
+///
+/// The receive buffer is allocated as `message_size * BUFFER_RESERVATION_HEADROOM`
+/// bytes to reduce re-allocation frequency under sustained packet load.
 const BUFFER_RESERVATION_HEADROOM: usize = 100;
 
-/// Providers are the multicast message sources. They are mostly defined by their multicast group (IPv4 or IPv6)
-/// They are configured through the ProviderConfig type.
+/// A UDP multicast listener bound to a specific group and network interface.
+///
+/// ## Lifecycle
+///
+/// 1. Create from configuration: `Provider::from(&ProviderConfig)`
+/// 2. Subscribe to multicast group: [`subscribe()`](Provider::subscribe) — creates the socket,
+///    sets options (`reuse_address`, `nonblocking`, buffer size), and joins the multicast group.
+/// 3. Start receiving: [`start_listener()`](Provider::start_listener) — runs the async receive
+///    loop, dispatching payloads to the given [`MessageSink`].
 pub struct Provider {
     pub group: IpAddr,
     #[cfg(feature = "metrics-exporter")]
@@ -133,7 +170,19 @@ impl Provider {
         Ok(())
     }
 
-    /// Listen for messages on the listening socket and process data accordingly
+    /// Start the asynchronous receive loop, dispatching UDP datagrams to the given sink.
+    ///
+    /// The loop uses `tokio::select!` with three branches:
+    /// - **Cancellation**: exits only when `in_flight` is empty (graceful drain).
+    /// - **Receive**: reads into `BytesMut`, splits via zero-copy `freeze()`, and pushes
+    ///   a sink delivery future into `in_flight`. Disabled when `in_flight.len() >= parallel_senders`
+    ///   to apply backpressure.
+    /// - **Completion**: polls `in_flight` for completed deliveries, logging success/failure
+    ///   and updating Prometheus counters when the `metrics-exporter` feature is active.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NbdError::Socket` if the socket has not been created (call [`subscribe`](Provider::subscribe) first).
     pub async fn start_listener<S: MessageSink>(
         &mut self,
         sink: S,
@@ -163,6 +212,10 @@ impl Provider {
                             Ok(len) => {
                                 if len == 0 {
                                     debug!("Received an empty packet on {}.", self.group);
+
+                                    #[cfg(feature = "metrics-exporter")]
+                                    metrics::counter!("nbd_empty_packets_total", "group" => self.group_label.clone()).increment(1);
+
                                     continue
                                 };
 

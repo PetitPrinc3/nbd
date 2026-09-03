@@ -35,4 +35,4 @@ jobs:
     - name: Deny check
       run: cargo deny check
     - name: Build
-      run: cargo build
+      run: cargo build --release --all-features

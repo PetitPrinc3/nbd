@@ -1,3 +1,25 @@
+//! Two-stage TOML configuration parsing and validation.
+//!
+//! This module implements a "parse, don't validate" approach:
+//!
+//! 1. **Stage 1 — Deserialization**: Raw TOML is deserialized into permissive intermediate
+//!    structs ([`RawConfig`], [`RawProviderConfig`], etc.) where most fields are `Option<T>`.
+//!
+//! 2. **Stage 2 — Validation & Transformation**: The raw structs are converted into
+//!    validated, strongly-typed runtime structs ([`Config`], [`ProviderConfig`], etc.)
+//!    via `TryFrom` implementations. Missing fields receive sensible defaults with
+//!    diagnostic logging; invalid values produce descriptive [`NbdError::Config`] errors.
+//!
+//! ## Validation rules
+//!
+//! - Multicast group addresses are verified via `IpAddr::is_multicast()`
+//! - IPv4/IPv6 family consistency between group and interface is enforced
+//! - Kafka topic names are validated against `[a-zA-Z0-9._-]{1,254}`
+//! - Port numbers warn on well-known (< 1024) and ephemeral (> 49151) ranges
+//! - Buffer sizes are cross-checked against `socket_buffer_size` and UDP max (65,507)
+//! - Kafka broker addresses are validated via DNS resolution
+//! - Metrics listener interfaces are probed via ephemeral UDP socket binding
+
 use serde::Deserialize;
 
 use std::cmp;
@@ -13,6 +35,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::errors::NbdError;
 
+/// Raw, unvalidated configuration deserialized directly from a TOML file.
+///
+/// All optional fields mirror the TOML structure. Convert to [`Config`] via
+/// `Config::try_from(raw_config)` to obtain validated, defaulted values.
 #[derive(Deserialize)]
 pub struct RawConfig {
     pub provider: Vec<RawProviderConfig>,
@@ -37,6 +63,7 @@ impl RawConfig {
     }
 }
 
+/// Raw `[[provider]]` section from the TOML configuration.
 #[derive(Deserialize)]
 pub struct RawProviderConfig {
     pub topic: Option<String>,
@@ -47,6 +74,7 @@ pub struct RawProviderConfig {
     pub interface: Option<Interface>,
 }
 
+/// Raw `[kafka]` section from the TOML configuration.
 #[derive(Deserialize)]
 pub struct RawProducerConfig {
     pub broker: String,
@@ -55,12 +83,14 @@ pub struct RawProducerConfig {
     pub message_retries: Option<u16>,
 }
 
+/// Raw `[nbd]` section from the TOML configuration.
 #[derive(Deserialize, Default)]
 pub struct RawNbdConfig {
     pub socket_buffer_size: Option<usize>,
     pub verbosity: Option<VerbosityLevels>,
 }
 
+/// Raw `[metrics]` section from the TOML configuration (requires `metrics-exporter` feature).
 #[cfg(feature = "metrics-exporter")]
 #[derive(Deserialize, Default)]
 pub struct RawMetricsConfig {
@@ -68,6 +98,10 @@ pub struct RawMetricsConfig {
     pub port: Option<u16>,
 }
 
+/// Validated, strongly-typed runtime configuration.
+///
+/// Constructed from [`RawConfig`] via `Config::try_from()`. All fields have been validated
+/// and missing values replaced with documented defaults.
 pub struct Config {
     pub provider: Vec<ProviderConfig>,
     pub kafka: ProducerConfig,
@@ -120,6 +154,10 @@ impl TryFrom<RawConfig> for Config {
     }
 }
 
+/// Validated configuration for a single multicast provider (UDP listener).
+///
+/// Each provider represents one multicast group to subscribe to and one Kafka topic
+/// to deliver messages to.
 pub struct ProviderConfig {
     pub topic: String,
     pub group: IpAddr,
@@ -388,6 +426,9 @@ impl ProviderConfig {
     }
 }
 
+/// Validated Kafka producer configuration.
+///
+/// Controls broker connection, delivery timeouts, and retry behavior.
 pub struct ProducerConfig {
     pub broker: String,
     pub connection_timeout: u64,
@@ -441,9 +482,9 @@ impl From<RawProducerConfig> for ProducerConfig {
 
         match raw_producer_config.message_timeout {
             Some(value) => {
-                if value < 100 {
+                if value < 10 {
                     info!(
-                        "The `kafka.message_timeout` parameter is low ({}ms). It is recommended to increase it to at least 100ms, depending on your infrastructure and network reliability.",
+                        "The `kafka.message_timeout` parameter is low ({}ms). It is recommended to increase it to at least 10ms, depending on your infrastructure and network reliability.",
                         value
                     );
                 } else {
@@ -454,9 +495,9 @@ impl From<RawProducerConfig> for ProducerConfig {
             }
             None => {
                 warn!(
-                    "The `nbd.kafka.message_timeout` parameter is unspecified and was replaced by a default value of `5000`ms."
+                    "The `nbd.kafka.message_timeout` parameter is unspecified and was replaced by a default value of `100`ms."
                 );
-                producer_config.message_timeout = 5_000;
+                producer_config.message_timeout = 100;
             }
         }
 
@@ -484,6 +525,7 @@ impl From<RawProducerConfig> for ProducerConfig {
     }
 }
 
+/// Validated daemon-level configuration (socket buffers, logging).
 pub struct NbdConfig {
     pub socket_buffer_size: usize,
     pub verbosity: VerbosityLevels,
@@ -540,6 +582,7 @@ impl TryFrom<RawNbdConfig> for NbdConfig {
     }
 }
 
+/// Validated Prometheus metrics exporter configuration (HTTP listener).
 #[cfg(feature = "metrics-exporter")]
 pub struct MetricsConfig {
     pub interface: IpAddr,
@@ -601,6 +644,10 @@ impl TryFrom<RawMetricsConfig> for MetricsConfig {
     }
 }
 
+/// Log verbosity level for the daemon.
+///
+/// Deserialized from lowercase strings in TOML (e.g. `"info"`, `"debug"`).
+/// Controls the `tracing` filter level at runtime via dynamic reloading.
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VerbosityLevels {
@@ -623,6 +670,13 @@ impl fmt::Display for VerbosityLevels {
     }
 }
 
+/// Network interface binding for multicast group membership.
+///
+/// Uses serde untagged deserialization so the TOML value is automatically
+/// parsed as either an IPv4 address string or an IPv6 interface index integer.
+///
+/// - [`V4`](Interface::V4) — IPv4 address of the local interface (e.g. `"192.168.1.10"` or `"0.0.0.0"` for any).
+/// - [`V6`](Interface::V6) — IPv6 scope/interface index (e.g. `0` for any, or `2` for a specific NIC).
 #[derive(Deserialize, Clone)]
 #[serde(untagged)]
 pub enum Interface {
