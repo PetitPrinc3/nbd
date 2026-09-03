@@ -6,6 +6,15 @@ const LIGHT: &str = "\x1B[2m";
 const WHITE: &str = "\x1B[38;2;255;255;255m";
 const ORANGE: &str = "\x1B[38;2;247;76;0m";
 
+/// Prints project metadata, version, build date, architecture, and ASCII art logo.
+///
+/// Detects terminal capabilities via [`IsTerminal`](std::io::IsTerminal) and respects
+/// the `NO_COLOR` environment variable. Renders 24-bit TrueColor output in capable
+/// terminals, falling back to monochrome ASCII art otherwise.
+///
+/// Build-time metadata is injected by `build.rs` and Cargo:
+/// `BUILD_DATE`, `BUILD_ARCH`, `CARGO_PKG_NAME`, `CARGO_PKG_VERSION`,
+/// `CARGO_PKG_AUTHORS`, `CARGO_PKG_DESCRIPTION`.
 pub fn about() {
     let build_date = env!("BUILD_DATE");
     let build_arch = env!("BUILD_ARCH");
