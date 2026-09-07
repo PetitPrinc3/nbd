@@ -51,7 +51,7 @@ It complies with the [ANSSI requirements](https://anssi-fr.github.io/rust-guide/
 
 - **High-performance data pipeline** from multiple UDP multicast groups to a single Kafka broker
 - **Zero-copy buffer management** using `bytes::BytesMut` split-and-freeze pattern
-- **Bounded async concurrency** with backpressure via `FuturesUnordered` and configurable `parallel_senders`
+- **Non-blocking ingestion & sink backpressure** with asynchronous delivery confirmation
 - **Comprehensive configuration validation** with two-stage parse-then-validate approach
 - **Graceful shutdown** via `CancellationToken` with in-flight message draining
 - **Optional Prometheus metrics exporter** over HTTP (feature-gated)
@@ -94,7 +94,7 @@ Each **Provider** is an async Tokio task that:
 1. Creates and configures an OS-level multicast socket via `socket2` (IGMP/MLD join, buffer sizing, non-blocking I/O)
 2. Receives UDP datagrams into a `BytesMut` buffer
 3. Splits received bytes via `split_to().freeze()` producing reference-counted `Bytes` — **zero memory copy**
-4. Dispatches payloads to a `MessageSink` implementation with bounded concurrency (`FuturesUnordered` capped at `parallel_senders`)
+4. Submits payloads non-blockingly to a `MessageSink` implementation (`sink.submit()`), managing in-flight delivery confirmations asynchronously without stalling UDP reception
 5. Drains all in-flight messages before terminating on cancellation
 
 ## Getting Started
@@ -162,7 +162,6 @@ topic = "market-data-feed"
 group = "239.255.0.1"
 port = 20001
 message_size = 1500
-parallel_senders = 30
 interface = "192.168.1.200"
 
 [[provider]]
@@ -170,7 +169,6 @@ topic = "order-events"
 group = "239.255.0.2"
 port = 20002
 message_size = 2048
-parallel_senders = 50
 interface = "192.168.2.200"
 ```
 
@@ -204,7 +202,6 @@ Repeatable section — one per multicast stream to ingest.
 | `group`            | `IpAddr`                     | **required**                    | Multicast group IP (must be a valid multicast address).                                                                            |
 | `port`             | `u16`                        | `20000 + index`                 | UDP port. Warns if < 1024 (well-known) or > 49151 (ephemeral).                                                                     |
 | `message_size`     | `usize`                      | `min(1500, socket_buffer_size)` | Expected max datagram size. Warns if > `socket_buffer_size` or > 65,507 (UDP max).                                                 |
-| `parallel_senders` | `usize`                      | `30`                            | Max concurrent in-flight Kafka sends. Cannot be zero. Use [Little's law](https://en.wikipedia.org/wiki/Little%27s_law) for sizing. |
 | `interface`        | `Ipv4Addr` or `u32` for Ipv6 | `0.0.0.0` / `0`                 | Network interface to bind. IPv4 address or IPv6 interface index. Must match the group's IP family.                                 |
 
 ### `[metrics]` Section
@@ -326,11 +323,13 @@ When built with `--features metrics-exporter`, NBD exposes the following counter
 |---|---|---|
 | `nbd_udp_packets_total` | Counter | Total UDP packets received |
 | `nbd_udp_bytes_total` | Counter | Total UDP bytes received |
-| `nbd_empty_packets_total` | Counter | Empty/zero-length packets received |
-| `nbd_kafka_sent_total` | Counter | Messages successfully sent to Kafka |
-| `nbd_errors_listeners_total` | Counter | Listener-level errors |
-| `nbd_errors_kafka_total` | Counter | Kafka delivery errors |
-| `nbd_e2e_latency` | Histogram | End-to-end latency (UDP receive → Kafka ack) |
+| `nbd_udp_empty_packets_total` | Counter | Empty/zero-length UDP packets received |
+| `nbd_kafka_sent_total` | Counter | Messages successfully confirmed by Kafka broker |
+| `nbd_errors_listeners_total` | Counter | Listener-level network receive errors |
+| `nbd_errors_full_queue_total` | Counter | Datagrams dropped due to sink queue full (backpressure) |
+| `nbd_errors_sender_total` | Counter | Messages rejected upon submission to sink |
+| `nbd_errors_kafka_total` | Counter | Kafka delivery failures during transaction confirmation |
+| `nbd_e2e_latency` | Histogram | End-to-end latency (UDP receive → Kafka delivery ack) |
 
 ## CI/CD
 

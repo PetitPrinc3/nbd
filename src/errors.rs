@@ -42,4 +42,8 @@ pub enum NbdError {
     /// Graceful shutdown timeout — some tasks did not terminate in time.
     #[error("An error occured while terminating the process : {0}")]
     Termination(String),
+
+    /// Backpressure error returned when a message sink buffer or transmission queue is full.
+    #[error("{0}")]
+    Backpressure(String),
 }

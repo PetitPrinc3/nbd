@@ -49,7 +49,6 @@ async fn minor_latency_test() {
         group: "239.255.0.1".parse().unwrap(), // multicast local, portable
         port: 0,                               // laisse l'OS choisir un port libre
         message_size: 2048,
-        parallel_senders: TEST_MESSAGE_COUNT,
         interface: Interface::V4(std::net::Ipv4Addr::UNSPECIFIED),
         // adapte les champs manquants/différents à ta vraie ProviderConfig
     };

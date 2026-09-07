@@ -59,7 +59,6 @@ async fn stress_test() {
         group: "239.255.0.1".parse().unwrap(),
         port: 0,
         message_size: 2048,
-        parallel_senders: 50,
         interface: Interface::V4(std::net::Ipv4Addr::UNSPECIFIED),
     };
 

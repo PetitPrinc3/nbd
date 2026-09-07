@@ -70,7 +70,6 @@ pub struct RawProviderConfig {
     pub group: IpAddr,
     pub port: Option<u16>,
     pub message_size: Option<usize>,
-    pub parallel_senders: Option<usize>,
     pub interface: Option<Interface>,
 }
 
@@ -163,7 +162,6 @@ pub struct ProviderConfig {
     pub group: IpAddr,
     pub port: u16,
     pub message_size: usize,
-    pub parallel_senders: usize,
     pub interface: Interface,
 }
 
@@ -178,7 +176,6 @@ impl ProviderConfig {
             group: raw_provider_config.group,
             port: 0,
             message_size: 0,
-            parallel_senders: 0,
             interface: Interface::V4(Ipv4Addr::UNSPECIFIED),
         };
 
@@ -385,40 +382,6 @@ impl ProviderConfig {
                     &idx, default_message_size,
                 );
                 provider_config.message_size = default_message_size;
-            }
-        }
-
-        match raw_provider_config.parallel_senders {
-            Some(value) => {
-                if value == 0 {
-                    error!(
-                        "The `providers.{}.parallel_senders` parameter can't be 0 and should at least be 1. Use of the `Little's law` is encouraged to determine a coherent value.",
-                        &idx
-                    );
-                    return Err(NbdError::Config(format!(
-                        "The `providers.{}.parallel_senders` parameter can't be 0.",
-                        idx,
-                    )));
-                } else if value < 10 {
-                    warn!(
-                        "The `providers.{}.parallel_senders` parameter seems low ({}). Use of the `Little's law` is encouraged to determine a coherent value.",
-                        &idx, value
-                    )
-                } else {
-                    debug!(
-                        "The `providers.{}.parallel_senders` parameter is configured correctly.",
-                        &idx
-                    );
-                };
-
-                provider_config.parallel_senders = value;
-            }
-            None => {
-                warn!(
-                    "The `providers.{}.parallel_senders` parameter is unspecified and was replaced by a default value of `30`.",
-                    &idx
-                );
-                provider_config.parallel_senders = 30;
             }
         }
 

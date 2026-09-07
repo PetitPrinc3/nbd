@@ -12,11 +12,13 @@
 //! is copied**. The buffer is re-allocated only when remaining capacity drops below
 //! the configured `message_size`.
 //!
-//! ## Bounded concurrency
+//! ## Concurrency & Backpressure
 //!
-//! In-flight sink deliveries are tracked in a [`FuturesUnordered`] collection. The
-//! receive branch of the `tokio::select!` loop is disabled when `in_flight.len() >=
-//! parallel_senders`, applying backpressure to prevent unbounded task accumulation.
+//! Incoming UDP datagrams are immediately submitted to the [`MessageSink`] via
+//! [`submit`](MessageSink::submit). If the sink's internal transmission queue is full,
+//! [`NbdError::Backpressure`] is returned and tracked via metrics without blocking
+//! the receive loop. In-flight delivery confirmations are tracked in a [`FuturesUnordered`]
+//! collection and drained in batches using `now_or_never()`.
 //!
 //! ## Graceful shutdown
 //!
@@ -29,8 +31,8 @@ use std::sync::Arc;
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 
 use tokio::net::UdpSocket;
 
@@ -65,7 +67,6 @@ pub struct Provider {
     port: u16,
     interface: Interface,
     buff_size: usize,
-    parallel_senders: usize,
     socket: Option<Socket>,
 }
 
@@ -80,7 +81,6 @@ impl From<&ProviderConfig> for Provider {
             port: config.port,
             interface: config.interface.clone(),
             buff_size: config.message_size,
-            parallel_senders: config.parallel_senders,
             socket: None,
         }
     }
@@ -174,11 +174,12 @@ impl Provider {
     ///
     /// The loop uses `tokio::select!` with three branches:
     /// - **Cancellation**: exits only when `in_flight` is empty (graceful drain).
-    /// - **Receive**: reads into `BytesMut`, splits via zero-copy `freeze()`, and pushes
-    ///   a sink delivery future into `in_flight`. Disabled when `in_flight.len() >= parallel_senders`
-    ///   to apply backpressure.
-    /// - **Completion**: polls `in_flight` for completed deliveries, logging success/failure
-    ///   and updating Prometheus counters when the `metrics-exporter` feature is active.
+    /// - **Receive**: reads into `BytesMut`, splits via zero-copy `freeze()`, and submits
+    ///   non-blockingly via [`sink.submit()`](MessageSink::submit). On success, the delivery
+    ///   confirmation future is pushed into `in_flight`. If the queue is full ([`NbdError::Backpressure`]),
+    ///   it records backpressure telemetry without blocking packet reception.
+    /// - **Completion**: polls and drains completed delivery confirmations from `in_flight`
+    ///   in batches via `now_or_never()`.
     ///
     /// # Errors
     ///
@@ -207,14 +208,14 @@ impl Provider {
                         warn!("Listener on {} was cancelled.", self.group);
                         break Ok(());
                     }
-                    stat = listener.recv_buf(&mut buf), if !cancel_token.is_cancelled() && in_flight.len() < self.parallel_senders => {
+                    stat = listener.recv_buf(&mut buf), if !cancel_token.is_cancelled() => {
                         match stat {
                             Ok(len) => {
                                 if len == 0 {
                                     debug!("Received an empty packet on {}.", self.group);
 
                                     #[cfg(feature = "metrics-exporter")]
-                                    metrics::counter!("nbd_empty_packets_total", "group" => self.group_label.clone()).increment(1);
+                                    metrics::counter!("nbd_udp_empty_packets_total", "group" => self.group_label.clone()).increment(1);
 
                                     continue
                                 };
@@ -226,15 +227,23 @@ impl Provider {
 
                                 let msg_buffer = buf.split_to(len).freeze();
                                 let msg_topic = Arc::clone(&self.topic);
-                                let msg_sink = sink.clone();
 
-                                in_flight.push(async move {
-                                    msg_sink.send(msg_topic, msg_buffer).await
-                                });
+                                match sink.submit(msg_topic, msg_buffer) {
+                                    Ok(confirmation) => in_flight.push(confirmation),
+                                    Err(NbdError::Backpressure(_)) => {
+                                        #[cfg(feature = "metrics-exporter")]
+                                        metrics::counter!("nbd_errors_full_queue_total", "group" => self.group_label.clone()).increment(1);
+                                    }
+                                    Err(_) => {
+                                        #[cfg(feature = "metrics-exporter")]
+                                        metrics::counter!("nbd_errors_sender_total", "group" => self.group_label.clone()).increment(1);
+                                    }
+                                }
 
                                 if buf.capacity() < self.buff_size {
                                     buf.reserve(self.buff_size * BUFFER_RESERVATION_HEADROOM);
                                 };
+
                             }
                             Err(e) => {
                                 #[cfg(feature = "metrics-exporter")]
@@ -247,27 +256,8 @@ impl Provider {
                             }
                         };
                     }
-                    Some(result) = in_flight.next() => {
-                        match result {
-                            Ok(_) => {
-                                #[cfg(feature = "metrics-exporter")]
-                                metrics::counter!("nbd_kafka_sent_total", "topic" => self.topic.clone()).increment(1);
-
-                                debug!(
-                                    "Successfully sent some message on topic {} !",
-                                    self.topic
-                                );
-                            }
-                            Err(e) => {
-                                #[cfg(feature = "metrics-exporter")]
-                                metrics::counter!("nbd_errors_kafka_total", "topic" => self.topic.clone()).increment(1);
-
-                                warn!(
-                                    "Failed to send one message on topic {} : {}",
-                                    self.topic, e
-                                );
-                             }
-                        }
+                    Some(_) = in_flight.next() => {
+                        while let Some(Some(_next)) = in_flight.next().now_or_never() {}
                     }
             };
         }

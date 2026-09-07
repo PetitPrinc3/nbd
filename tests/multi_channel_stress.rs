@@ -65,8 +65,6 @@ async fn multi_channel_stress_test() {
             group: format!("239.255.0.{i}").parse().unwrap(),
             port: 0,
             message_size: 2048,
-            parallel_senders: (1000.0 * 0.01 * (1_000_000.0 / (STRESS_TEST_FRQ_MICROS as f64)))
-                as usize,
             interface: Interface::V4(std::net::Ipv4Addr::UNSPECIFIED),
         };
 

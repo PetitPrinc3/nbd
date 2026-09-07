@@ -1,7 +1,7 @@
 //! Message delivery abstractions and implementations.
 //!
 //! This module defines the [`MessageSink`] trait, which decouples the UDP multicast
-//! receiver ([`Provider`](crate::providers::Provider)) from the message destination.
+//! receiver ([`Provider`](crate::Provider)) from the message destination.
 //! This enables zero-cost in-memory benchmarking without a Kafka broker.
 //!
 //! ## Implementations
@@ -15,63 +15,116 @@ use bytes::Bytes;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use tracing::{debug, warn};
+
+use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::producer::FutureProducer;
 use rdkafka::producer::FutureRecord;
-use rdkafka::util::Timeout;
 
 use crate::errors::NbdError;
 
 const UNIX_EPOCH: SystemTime = SystemTime::UNIX_EPOCH;
 
-/// Trait abstracting the delivery of a message payload to a destination.
+/// Trait abstracting the non-blocking submission and asynchronous delivery confirmation of a message.
 ///
 /// Implementations must be `Clone + Send + 'static` so they can be shared across
-/// concurrent async tasks in the [`Provider`](crate::providers::Provider) receive loop.
+/// concurrent async tasks in the [`Provider`](crate::Provider) receive loop.
+///
+/// ## Submission model
+///
+/// - [`submit`](MessageSink::submit) enqueues or processes the payload non-blockingly,
+///   returning a [`Transaction`](MessageSink::Transaction) future representing the asynchronous
+///   delivery confirmation, or returns [`NbdError::Backpressure`] if the sink queue is full.
+/// - Awaiting the returned [`Transaction`](MessageSink::Transaction) future confirms delivery
+///   or yields an error.
 ///
 /// # Arguments
 ///
 /// * `topic` — The Kafka topic (or logical channel) to deliver the message to.
 /// * `payload` — The raw message bytes, produced via zero-copy `BytesMut::split_to().freeze()`.
 pub trait MessageSink: Clone + Send + 'static {
-    fn send(
-        &self,
-        topic: Arc<str>,
-        payload: Bytes,
-    ) -> impl std::future::Future<Output = Result<(), NbdError>> + Send;
+    type Transaction: std::future::Future<Output = Result<(), NbdError>> + Send + 'static;
+
+    fn submit(&self, topic: Arc<str>, payload: Bytes) -> Result<Self::Transaction, NbdError>;
 }
 
 /// Production [`MessageSink`] implementation that delivers messages to a Kafka broker
 /// via `rdkafka::FutureProducer`.
 ///
-/// Messages are sent with a 100ms delivery timeout. When the `metrics-exporter` feature
-/// is enabled, end-to-end latency is computed by extracting the transmit timestamp from
-/// payload bytes `[4..12]` (iperf-compatible header: `u32` seconds + `u32` microseconds)
+/// Submits messages non-blockingly using `send_result`. If the librdkafka producer queue is full,
+/// immediately returns [`NbdError::Backpressure`]. When the `metrics-exporter` feature is enabled,
+/// end-to-end latency is computed in the transaction future by extracting the transmit timestamp
+/// from payload bytes `[4..12]` (iperf-compatible header: `u32` seconds + `u32` microseconds)
 /// and recording the delta in the `nbd_e2e_latency` Prometheus histogram.
 impl MessageSink for FutureProducer {
-    async fn send(&self, topic: Arc<str>, payload: Bytes) -> Result<(), NbdError> {
+    type Transaction =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), NbdError>> + Send>>;
+
+    fn submit(&self, topic: Arc<str>, payload: Bytes) -> Result<Self::Transaction, NbdError> {
         let record: FutureRecord<[u8], [u8]> = FutureRecord::to(&topic).payload(&payload);
-        FutureProducer::send(self, record, Timeout::After(Duration::from_millis(100)))
-            .await
-            .map(|_| {
-                #[cfg(feature = "metrics-exporter")]
-                {
-                    if payload.len() > 12 {
-                        let ts_rx = SystemTime::now();
+        match self.send_result(record) {
+            Ok(delivery_future) => {
+                Ok(Box::pin(async move {
+                    match delivery_future.await {
+                        Ok(Ok(_offset_info)) => {
+                            #[cfg(feature = "metrics-exporter")]
+                            {
+                                if payload.len() > 12 {
+                                    let ts_rx = SystemTime::now();
 
-                        //let pkt_idx = u32::from_be_bytes(payload[..4].try_into().unwrap());
+                                    //let pkt_idx = u32::from_be_bytes(payload[..4].try_into().unwrap());
 
-                        let ts_tx = u32::from_be_bytes(payload[4..8].try_into().unwrap()) as u64;
-                        let ts_tx_micros = (ts_tx * 1_000_000
-                            + (u32::from_be_bytes(payload[8..12].try_into().unwrap()) as u64))
-                            as u128;
-                        let ts_rx_micros = ts_rx.duration_since(UNIX_EPOCH).unwrap().as_micros();
-                        let latency = Duration::from_micros((ts_rx_micros - ts_tx_micros) as u64);
+                                    let ts_tx =
+                                        u32::from_be_bytes(payload[4..8].try_into().unwrap())
+                                            as u64;
+                                    let ts_tx_micros = (ts_tx * 1_000_000
+                                        + (u32::from_be_bytes(payload[8..12].try_into().unwrap())
+                                            as u64))
+                                        as u128;
+                                    let ts_rx_micros =
+                                        ts_rx.duration_since(UNIX_EPOCH).unwrap().as_micros();
+                                    let latency =
+                                        Duration::from_micros((ts_rx_micros - ts_tx_micros) as u64);
 
-                        metrics::histogram!("nbd_e2e_latency").record(latency);
-                    };
-                }
-            })
-            .map_err(|(e, _)| NbdError::Kafka(e))
+                                    metrics::histogram!("nbd_e2e_latency").record(latency);
+                                };
+                                metrics::counter!("nbd_kafka_sent_total", "topic" => topic.clone())
+                                    .increment(1);
+                            }
+
+                            debug!("Successfully sent some message on topic {} !", &topic);
+
+                            Ok(())
+                        }
+                        Ok(Err((e, _msg))) => {
+                            #[cfg(feature = "metrics-exporter")]
+                            metrics::counter!("nbd_errors_kafka_total", "topic" => topic.clone())
+                                .increment(1);
+
+                            warn!("Failed to send one message on topic {} : {}", &topic, e);
+                            Err(NbdError::Kafka(e))
+                        }
+                        Err(_canceled) => {
+                            warn!(
+                                "Producer canceled before send confirmation for one message on topic {}.",
+                                &topic
+                            );
+                            Err(NbdError::Backpressure(format!(
+                                "Failed to send one message on topic {} because the producer was cancelled.",
+                                topic
+                            )))
+                        }
+                    }
+                }))
+            }
+            Err((KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull), _record)) => {
+                Err(NbdError::Backpressure(format!(
+                    "Failed to send one message on topic {} because the queue is full.",
+                    topic
+                )))
+            }
+            Err((e, _record)) => Err(NbdError::Kafka(e)),
+        }
     }
 }
 
@@ -102,7 +155,9 @@ impl Default for BenchSink {
 }
 
 impl MessageSink for BenchSink {
-    async fn send(&self, _topic: Arc<str>, payload: Bytes) -> Result<(), NbdError> {
+    type Transaction = std::future::Ready<Result<(), NbdError>>;
+
+    fn submit(&self, _topic: Arc<str>, payload: Bytes) -> Result<Self::Transaction, NbdError> {
         let ts_rx = Instant::now();
         let ts_tx_ns = u64::from_be_bytes(payload[..8].try_into().unwrap());
         let ts_tx = self.epoch + Duration::from_nanos(ts_tx_ns);
@@ -116,7 +171,7 @@ impl MessageSink for BenchSink {
             .unwrap()
             .push(ts_rx.duration_since(ts_tx));
 
-        Ok(())
+        Ok(std::future::ready(Ok(())))
     }
 }
 
@@ -156,7 +211,9 @@ impl Default for IPerfSink {
 }
 
 impl MessageSink for IPerfSink {
-    async fn send(&self, _topic: Arc<str>, payload: Bytes) -> Result<(), NbdError> {
+    type Transaction = std::future::Ready<Result<(), NbdError>>;
+
+    fn submit(&self, _topic: Arc<str>, payload: Bytes) -> Result<Self::Transaction, NbdError> {
         let ts_rx = SystemTime::now();
 
         if payload.len() < 12 {
@@ -187,6 +244,6 @@ impl MessageSink for IPerfSink {
         self.received_bytes
             .fetch_add(payload.len(), std::sync::atomic::Ordering::Relaxed);
 
-        Ok(())
+        Ok(std::future::ready(Ok(())))
     }
 }

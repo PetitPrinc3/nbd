@@ -5,12 +5,12 @@
 //!
 //! ## Architecture
 //!
-//! The library is organized around four core modules:
+//! The library is organized around four core areas:
 //!
-//! - **[`config`]** — Two-stage TOML configuration parsing and validation.
-//! - **[`errors`]** — Centralized error types via [`thiserror`].
-//! - **[`providers`]** — UDP multicast socket management and zero-copy async receive loop.
-//! - **[`sinks`]** — [`MessageSink`] trait abstraction with Kafka, benchmark, and iperf implementations.
+//! - **Configuration** ([`Config`], [`RawConfig`]) — Two-stage TOML configuration parsing and validation.
+//! - **Error handling** ([`NbdError`]) — Centralized error types via [`thiserror`].
+//! - **Multicast ingestion** ([`Provider`]) — UDP multicast socket management and zero-copy async receive loop.
+//! - **Message sinks** ([`MessageSink`]) — Trait abstraction with Kafka, benchmark, and iperf implementations.
 //!
 //! ## Usage
 //!
