@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+#![deny(clippy::mem_forget)]
 //! # Nothing But Data
 //!
 //! A lightweight, high-performance and secure data pipeline for ingesting real-time

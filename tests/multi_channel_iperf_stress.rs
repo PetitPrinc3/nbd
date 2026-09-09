@@ -5,6 +5,7 @@ use commons::show_report;
 
 use nothing_but_data::{IPerfSink, Interface, Provider, ProviderConfig};
 
+#[cfg(feature = "metrics-exporter")]
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
