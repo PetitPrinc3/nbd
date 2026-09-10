@@ -291,17 +291,16 @@ A comprehensive performance review is provided under [performance.md](PERFORMANC
 
 When built with `--features metrics-exporter`, NBD exposes the following counters and histograms via an HTTP endpoint:
 
-| Metric | Type | Description |
-|---|---|---|
-| `nbd_udp_packets_total` | Counter | Total UDP packets received |
-| `nbd_udp_bytes_total` | Counter | Total UDP bytes received |
-| `nbd_udp_empty_packets_total` | Counter | Empty/zero-length UDP packets received |
-| `nbd_kafka_sent_total` | Counter | Messages successfully confirmed by Kafka broker |
-| `nbd_errors_listeners_total` | Counter | Listener-level network receive errors |
-| `nbd_errors_full_queue_total` | Counter | Datagrams dropped due to sink queue full (backpressure) |
-| `nbd_errors_sender_total` | Counter | Messages rejected upon submission to sink |
-| `nbd_errors_kafka_total` | Counter | Kafka delivery failures during transaction confirmation |
-| `nbd_e2e_latency` | Histogram | End-to-end latency (UDP receive → Kafka delivery ack) |
+| Metric                        | Type      | Description                                             |
+| ----------------------------- | --------- | ------------------------------------------------------- |
+| `nbd_udp_packets_total`       | Counter   | Total UDP packets received                              |
+| `nbd_udp_bytes_total`         | Counter   | Total UDP bytes received                                |
+| `nbd_udp_empty_packets_total` | Counter   | Empty/zero-length UDP packets received                  |
+| `nbd_kafka_sent_total`        | Counter   | Messages successfully confirmed by Kafka broker         |
+| `nbd_errors_listeners_total`  | Counter   | Listener-level network receive errors                   |
+| `nbd_errors_full_queue_total` | Counter   | Datagrams dropped due to sink queue full (backpressure) |
+| `nbd_errors_sender_total`     | Counter   | Messages rejected upon submission to sink               |
+| `nbd_errors_kafka_total`      | Counter   | Kafka delivery failures during transaction confirmation |
 
 ## CI/CD
 
@@ -375,7 +374,9 @@ nbd/
 ├── Cargo.toml             # Project manifest & dependencies
 ├── deny.toml              # cargo-deny supply chain policy
 ├── rust-toolchain.toml    # Pinned toolchain (1.97.1) + targets
-└── LICENSE                # GPL-3.0-or-later
+├── LICENSE                # GPL-3.0-or-later
+├── SECURITY               # Project security hardening review
+└── PERFORMANCE            # Project performance review
 ```
 
 ## License

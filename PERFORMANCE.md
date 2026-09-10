@@ -30,7 +30,10 @@ NBD is a CPU-intensive process: performance depends heavily on the combination o
 ## End-to-end
 
 The end-to-end test measures the complete message transaction — from UDP datagram emission to Kafka delivery acknowledgment. It is the most representative test of NBD's contribution to real-world pipeline latency, since it covers every hop the data actually travels through.
-The kafka broker is a virtualised mock server provided by [Testcontainer]()'s `Redpanda` docker container.
+The Kafka broker is a virtualized mock server provisioned by [Testcontainers](https://testcontainers.com/)' `Redpanda` module.
+
+> [!NOTE]
+> This test runs from an external Python-based test harness, not from this repository's `tests/` suite — there is no corresponding Rust test file or `testcontainers` crate dependency here.
 
 ### `e2e_perf_test`
 

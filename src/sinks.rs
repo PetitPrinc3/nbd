@@ -67,9 +67,9 @@ impl MessageSink for FutureProducer {
                 Ok(Box::pin(async move {
                     match delivery_future.await {
                         Ok(Ok(_offset_info)) => {
-                            // This section is only used for testing by computing latencies for the end-to-end test.
-                            //#[cfg(feature = "metrics-exporter")]
-                            //{
+                            #[cfg(feature = "metrics-exporter")]
+                            {
+                                  // This section is only used for testing by computing latencies for the end-to-end test.
                             //    if payload.len() > 12 {
                             //        let ts_rx = SystemTime::now();
 
@@ -89,9 +89,9 @@ impl MessageSink for FutureProducer {
 
                             //        metrics::histogram!("nbd_e2e_latency").record(latency);
                             //    };
-                            //    metrics::counter!("nbd_kafka_sent_total", "topic" => topic.clone())
-                            //        .increment(1);
-                            //}
+                                metrics::counter!("nbd_kafka_sent_total", "topic" => topic.clone())
+                                    .increment(1);
+                            }
 
                             debug!("Successfully sent some message on topic {} !", &topic);
 
@@ -160,6 +160,14 @@ impl MessageSink for BenchSink {
 
     fn submit(&self, _topic: Arc<str>, payload: Bytes) -> Result<Self::Transaction, NbdError> {
         let ts_rx = Instant::now();
+
+        if payload.len() < 8 {
+            return Err(NbdError::InvalidPacket(format!(
+                "packet len < 8 ({})",
+                payload.len()
+            )));
+        }
+
         let ts_tx_ns = u64::from_be_bytes(payload[..8].try_into().unwrap());
         let ts_tx = self.epoch + Duration::from_nanos(ts_tx_ns);
 
