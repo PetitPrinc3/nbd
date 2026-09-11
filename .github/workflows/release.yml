@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release target tag.'
+        required: false
+        default: 'v0.1.0-beta'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Linux Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libsasl2-dev cmake
+
+      - name: Build standard binary
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          cargo build --release
+          cp target/release/nbd "./nbd_${TAG}"
+
+      - name: Build binary with metrics
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          cargo build --release --features metrics-exporter
+          cp target/release/nbd "./nbd_${TAG}_with_metrics"
+
+      - name: Upload Linux binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: |
+            nbd_*
+
+  build-windows:
+    name: Build Windows Binaries
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build standard binary
+        shell: pwsh
+        run: |
+          $tag = if ("${{ inputs.tag }}" -ne "") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
+          cargo build --release
+          Copy-Item target/release/nbd.exe -Destination "./nbd_${tag}.exe"
+
+      - name: Build binary with metrics
+        shell: pwsh
+        run: |
+          $tag = if ("${{ inputs.tag }}" -ne "") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
+          cargo build --release --features metrics-exporter
+          Copy-Item target/release/nbd.exe -Destination "./nbd_${tag}_with_metrics.exe"
+
+      - name: Upload Windows binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          path: |
+            nbd_*.exe
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all built binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Upload Assets to Existing Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release-assets/*
