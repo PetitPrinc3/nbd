@@ -23,7 +23,7 @@
 //! ## Example
 //!
 //! ```no_run
-//! use nothing_but_data::{RawConfig, Config, Provider};
+//! use nbd::{RawConfig, Config, Provider};
 //! use std::path::PathBuf;
 //!
 //! let raw = RawConfig::from_path(&PathBuf::from("config.toml")).unwrap();

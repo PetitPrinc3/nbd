@@ -69,26 +69,26 @@ impl MessageSink for FutureProducer {
                         Ok(Ok(_offset_info)) => {
                             #[cfg(feature = "metrics-exporter")]
                             {
-                                  // This section is only used for testing by computing latencies for the end-to-end test.
-                            //    if payload.len() > 12 {
-                            //        let ts_rx = SystemTime::now();
+                                // This section is only used for testing by computing latencies for the end-to-end test.
+                                //    if payload.len() > 12 {
+                                //        let ts_rx = SystemTime::now();
 
-                            //        //let pkt_idx = u32::from_be_bytes(payload[..4].try_into().unwrap());
+                                //        //let pkt_idx = u32::from_be_bytes(payload[..4].try_into().unwrap());
 
-                            //        let ts_tx =
-                            //            u32::from_be_bytes(payload[4..8].try_into().unwrap())
-                            //                as u64;
-                            //        let ts_tx_micros = (ts_tx * 1_000_000
-                            //            + (u32::from_be_bytes(payload[8..12].try_into().unwrap())
-                            //                as u64))
-                            //            as u128;
-                            //        let ts_rx_micros =
-                            //            ts_rx.duration_since(UNIX_EPOCH).unwrap().as_micros();
-                            //        let latency =
-                            //            Duration::from_micros((ts_rx_micros - ts_tx_micros) as u64);
+                                //        let ts_tx =
+                                //            u32::from_be_bytes(payload[4..8].try_into().unwrap())
+                                //                as u64;
+                                //        let ts_tx_micros = (ts_tx * 1_000_000
+                                //            + (u32::from_be_bytes(payload[8..12].try_into().unwrap())
+                                //                as u64))
+                                //            as u128;
+                                //        let ts_rx_micros =
+                                //            ts_rx.duration_since(UNIX_EPOCH).unwrap().as_micros();
+                                //        let latency =
+                                //            Duration::from_micros((ts_rx_micros - ts_tx_micros) as u64);
 
-                            //        metrics::histogram!("nbd_e2e_latency").record(latency);
-                            //    };
+                                //        metrics::histogram!("nbd_e2e_latency").record(latency);
+                                //    };
                                 metrics::counter!("nbd_kafka_sent_total", "topic" => topic.clone())
                                     .increment(1);
                             }

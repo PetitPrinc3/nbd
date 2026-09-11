@@ -3,7 +3,7 @@ mod commons;
 use commons::NtSetTimerResolution;
 use commons::show_report;
 
-use nothing_but_data::{BenchSink, Interface, Provider, ProviderConfig};
+use nbd::{BenchSink, Interface, Provider, ProviderConfig};
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};

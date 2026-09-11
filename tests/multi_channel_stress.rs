@@ -3,7 +3,7 @@ mod commons;
 use commons::NtSetTimerResolution;
 use commons::show_report;
 
-use nothing_but_data::{BenchSink, Interface, Provider, ProviderConfig};
+use nbd::{BenchSink, Interface, Provider, ProviderConfig};
 
 use std::net::SocketAddr;
 use std::sync::Arc;

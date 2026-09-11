@@ -15,6 +15,7 @@ const ORANGE: &str = "\x1B[38;2;247;76;0m";
 /// Build-time metadata is injected by `build.rs` and Cargo:
 /// `BUILD_DATE`, `BUILD_ARCH`, `CARGO_PKG_NAME`, `CARGO_PKG_VERSION`,
 /// `CARGO_PKG_AUTHORS`, `CARGO_PKG_DESCRIPTION`.
+/// Enabled features are indicated at build time via via cfg!().
 pub fn about() {
     let build_date = env!("BUILD_DATE");
     let build_arch = env!("BUILD_ARCH");
@@ -24,11 +25,17 @@ pub fn about() {
     let build_desc = env!("CARGO_PKG_DESCRIPTION");
     let env_no_color = std::env::var("NO_COLOR").unwrap_or_default();
 
+    let features = if cfg!(feature = "metrics-exporter") {
+        " [+metrics-exporter]"
+    } else {
+        ""
+    };
+
     if env_no_color.is_empty() && io::stdout().is_terminal() {
         println!("{RESET}{ORANGE}  .@@@@@@@.    {RESET}");
         println!(
-            "{RESET}{ORANGE}.@@@{RESET}{WHITE}{BOLD}o{RESET}{ORANGE}@{RESET}{WHITE}{BOLD}o{RESET}{ORANGE}@{RESET}{WHITE}{BOLD}o{RESET}{ORANGE}@@@.{RESET}{WHITE}{BOLD}  {} {} ({}) built on {}{RESET}",
-            build_name, build_vers, build_arch, build_date,
+            "{RESET}{ORANGE}.@@@{RESET}{WHITE}{BOLD}o{RESET}{ORANGE}@{RESET}{WHITE}{BOLD}o{RESET}{ORANGE}@{RESET}{WHITE}{BOLD}o{RESET}{ORANGE}@@@.{RESET}{WHITE}{BOLD}  {} {}{} ({}) built on {}{RESET}",
+            build_name, build_vers, features, build_arch, build_date,
         );
         println!(
             "{RESET}{ORANGE}@@@@@{RESET}{WHITE}{BOLD}\\|/{RESET}{ORANGE}@@@@@{RESET}{WHITE}{LIGHT}  {}{RESET}",
@@ -48,8 +55,8 @@ pub fn about() {
     } else {
         println!("  .#######.    ");
         println!(
-            ".## o o o ##.  {} {} ({}) built on {}",
-            build_name, build_vers, build_arch, build_date,
+            ".## o o o ##.  {} {}{} ({}) built on {}",
+            build_name, build_vers, features, build_arch, build_date,
         );
         println!("##   \\|/   ##  {}", build_desc,);
         println!("##    O    ##  / * * *");

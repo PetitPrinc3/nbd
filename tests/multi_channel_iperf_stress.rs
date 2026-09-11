@@ -3,7 +3,7 @@ mod commons;
 use commons::NtSetTimerResolution;
 use commons::show_report;
 
-use nothing_but_data::{IPerfSink, Interface, Provider, ProviderConfig};
+use nbd::{IPerfSink, Interface, Provider, ProviderConfig};
 
 #[cfg(feature = "metrics-exporter")]
 use std::net::{IpAddr, Ipv4Addr};

@@ -557,7 +557,7 @@ impl TryFrom<RawMetricsConfig> for MetricsConfig {
     type Error = NbdError;
     fn try_from(raw_metrics_config: RawMetricsConfig) -> Result<Self, Self::Error> {
         let mut metrics_config = MetricsConfig {
-            interface: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            interface: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 9000,
         };
 
@@ -586,7 +586,7 @@ impl TryFrom<RawMetricsConfig> for MetricsConfig {
             },
             None => {
                 warn!(
-                    "The `metrics.interface` parameter is not set. It was be replaced by the Ipv4 loopback interface (0.0.0.0)."
+                    "The `metrics.interface` parameter is not set. It was be replaced by the Ipv4 loopback interface (127.0.0.1)."
                 );
             }
         }

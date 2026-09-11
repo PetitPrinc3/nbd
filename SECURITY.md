@@ -194,4 +194,3 @@ What's left is deployment-level limitations:
 Roughly in priority order:
 
 1. Add a `security.protocol` / `ssl.*` / `sasl.*` configuration surface to `[kafka]`, and consider failing closed (refuse to start) if an operator hasn't explicitly opted into `PLAINTEXT`.
-2. Decide the fate of the commented-out `metrics-exporter` block in `FutureProducer::submit`: at minimum, restore `nbd_kafka_sent_total` (no timestamp math involved, nothing risky about it); for `nbd_e2e_latency`, either reintroduce the computation with `checked_sub`/`saturating_sub` and skip-on-failure instead of panicking, or drop the metric from the README until it's reimplemented.

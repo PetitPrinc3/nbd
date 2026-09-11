@@ -45,6 +45,8 @@ It complies with the [ANSSI requirements](https://anssi-fr.github.io/rust-guide/
 - [CI/CD](#cicd)
 - [ANSSI Compliance](#anssi-compliance)
 - [Project Structure](#project-structure)
+- [Contributing](#contributing) 
+- [Changelog](#changelog)
 - [License](#license)
 
 ## Features
@@ -180,10 +182,10 @@ Repeatable section — one per multicast stream to ingest.
 
 *Requires the `metrics-exporter` feature.*
 
-| Parameter   | Type     | Default         | Description                                                 |
-| ----------- | -------- | --------------- | ----------------------------------------------------------- |
-| `interface` | `IpAddr` | `192.168.1.200` | HTTP listener interface. Validated against host interfaces. |
-| `port`      | `u16`    | `9000`          | HTTP listener port for Prometheus scraping.                 |
+| Parameter   | Type     | Default     | Description                                                 |
+| ----------- | -------- | ----------- | ----------------------------------------------------------- |
+| `interface` | `IpAddr` | `127.0.0.1` | HTTP listener interface. Validated against host interfaces. |
+| `port`      | `u16`    | `9000`      | HTTP listener port for Prometheus scraping.                 |
 
 ## Deployment
 
@@ -375,9 +377,19 @@ nbd/
 ├── deny.toml              # cargo-deny supply chain policy
 ├── rust-toolchain.toml    # Pinned toolchain (1.97.1) + targets
 ├── LICENSE                # GPL-3.0-or-later
+├── CONTRIBUTING           # Contributing guidelines
+├── CHANGELOG              # Project changelog
 ├── SECURITY               # Project security hardening review
 └── PERFORMANCE            # Project performance review
 ```
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, quality gates, and PR process before opening a pull request.
+
+## Changelog
+
+Release history and notable changes are tracked in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

@@ -1,6 +1,6 @@
 [package]
-name = "nothing_but_data"
-version = "0.1.0"
+name = "nbd"
+version = "0.1.0-beta"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["Arthur Reppelin `PetitPrinc3` (arthur.reppelin@gmail.com)"]
@@ -27,6 +27,7 @@ chrono = "0.4.45"
 
 [profile.release]
 overflow-checks = true
+strip = "symbols"
 
 [features]
 default = []

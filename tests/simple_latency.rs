@@ -3,7 +3,7 @@ mod commons;
 #[cfg(windows)]
 use commons::NtSetTimerResolution;
 
-use nothing_but_data::{BenchSink, Interface, Provider, ProviderConfig};
+use nbd::{BenchSink, Interface, Provider, ProviderConfig};
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;

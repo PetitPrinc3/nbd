@@ -32,7 +32,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 
 use clap::Parser;
 
-use nothing_but_data::{Config, NbdError, Provider, RawConfig};
+use nbd::{Config, NbdError, Provider, RawConfig};
 
 mod args;
 use args::Cli;
