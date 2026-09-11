@@ -30,10 +30,6 @@ async fn multi_channel_stress_test() {
     #[cfg(feature = "metrics-exporter")]
     match PrometheusBuilder::new()
         .with_http_listener((IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9000))
-        .set_buckets_for_metric(
-            "nbd_e2e_latency",
-            &[0.000001, 0.00001, 0.0001, 0.001, 0.01, 0.1, 1],
-        )
         .install()
     {
         Ok(_) => {
@@ -95,7 +91,7 @@ async fn multi_channel_stress_test() {
         provider.subscribe(&(250 * 1024 * 1024)).unwrap();
 
         let port = match provider.get_socket() {
-            Ok(ref socket) => match socket.local_addr() {
+            Ok(socket) => match socket.local_addr() {
                 Ok(sockaddr) => match sockaddr.as_socket() {
                     Some(socketaddr) => socketaddr.port(),
                     None => 0,
@@ -132,7 +128,7 @@ async fn multi_channel_stress_test() {
         .clone()
         .into_iter()
         .map(|s| s.received_messages.load(Ordering::Relaxed))
-        .sum::<u64>() as u64;
+        .sum::<u64>();
 
     let latencies = test_sinks
         .clone()

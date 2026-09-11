@@ -68,4 +68,4 @@ cargo audit
 
 ## Vulnerability Reporting
 
-Please **do not** report security vulnerabilities through public GitHub issues. Refer to the [Security Policy](https://claude.ai/chat/SECURITY.md#reporting-a-vulnerability) for instructions on emailing the maintainer directly.
+Please **do not** report security vulnerabilities through public GitHub issues. Refer to the [Security Policy](SECURITY.md#reporting-a-vulnerability) for instructions on emailing the maintainer directly.

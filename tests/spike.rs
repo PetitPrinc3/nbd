@@ -70,7 +70,7 @@ async fn spike_test() {
     let test_sink = BenchSink::default();
 
     let port = match provider.get_socket() {
-        Ok(ref socket) => match socket.local_addr() {
+        Ok(socket) => match socket.local_addr() {
             Ok(sockaddr) => match sockaddr.as_socket() {
                 Some(socketaddr) => socketaddr.port(),
                 None => 0,
@@ -93,7 +93,7 @@ async fn spike_test() {
     match sender_socket {
         Ok(_) => {}
         Err(ref e) => {
-            println!("Failed to bind socket : {}", &e);
+            println!("Failed to bind socket : {}", e);
         }
     }
 

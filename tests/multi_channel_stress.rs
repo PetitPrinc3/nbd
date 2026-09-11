@@ -72,7 +72,7 @@ async fn multi_channel_stress_test() {
         provider.subscribe(&(2 * 1024 * 1024)).unwrap();
 
         let port = match provider.get_socket() {
-            Ok(ref socket) => match socket.local_addr() {
+            Ok(socket) => match socket.local_addr() {
                 Ok(sockaddr) => match sockaddr.as_socket() {
                     Some(socketaddr) => socketaddr.port(),
                     None => 0,
@@ -114,11 +114,8 @@ async fn multi_channel_stress_test() {
                         let nanos = task_sink.epoch.elapsed().as_nanos() as u64;
                         payload[..8].copy_from_slice(&nanos.to_be_bytes());
 
-                        match task_socket.send_to(&payload, dst_addr).await {
-                            Ok(_) => {
-                                task_tx_count.fetch_add(1, Ordering::Relaxed);
-                            }
-                            Err(_) => {}
+                        if task_socket.send_to(&payload, dst_addr).await.is_ok() {
+                            task_tx_count.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -143,7 +140,7 @@ async fn multi_channel_stress_test() {
         .clone()
         .into_iter()
         .map(|s| s.received_messages.load(Ordering::Relaxed))
-        .sum::<u64>() as u64;
+        .sum::<u64>();
 
     let latencies = test_sinks
         .clone()

@@ -95,13 +95,13 @@ cargo build --release --features metrics-exporter
 
 ```bash
 # Run the daemon with a configuration file
-nothing_but_data --config-file /path/to/config.toml
+nbd --config-file /path/to/config.toml
 
 # Validate a configuration file (dry-run)
-nothing_but_data --check-config-file /path/to/config.toml
+nbd --check-config-file /path/to/config.toml
 
 # Display build & version information
-nothing_but_data --about
+nbd --about
 ```
 
 | Flag | Description | Conflicts with |
@@ -209,7 +209,7 @@ Description=Nothing But Data
 After=network-online.target
 
 [Service]
-ExecStart=/opt/nbd/nothing_but_data --config-file /opt/nbd/config.toml
+ExecStart=/opt/nbd/nbd --config-file /opt/nbd/config.toml
 Restart=on-failure
 RestartSec=5
 

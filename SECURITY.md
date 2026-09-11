@@ -93,7 +93,7 @@ Covered in [README/Kernel Tuning](README.md#kernel-tuning). The recommended `net
 ### Configuration and Secrets Handling
 
 - `config.toml` currently carries no secret material — there's no credential field in the schema yet (see [Known Limitations](#known-limitations)). Once TLS/SASL support lands, treat the config file like any other credentials file: `chmod 600`, owned by the `DynamicUser`-allocated runtime user, never committed to version control.
-- `nothing_but_data --check-config-file` validates configuration without starting the daemon — use it in CI/CD or a pre-deploy step rather than validating by pointing a live run at production multicast groups.
+- `nbd --check-config-file` validates configuration without starting the daemon — use it in CI/CD or a pre-deploy step rather than validating by pointing a live run at production multicast groups.
 - Nothing in the current logging paths prints secret material, because there isn't any yet (e.g. `info!("Connecting to the Kafka broker at {} ...", config.kafka.broker)` only ever logs a host:port).
 
 ### Logging

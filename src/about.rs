@@ -14,7 +14,7 @@ const ORANGE: &str = "\x1B[38;2;247;76;0m";
 ///
 /// Build-time metadata is injected by `build.rs` and Cargo:
 /// `BUILD_DATE`, `BUILD_ARCH`, `CARGO_PKG_NAME`, `CARGO_PKG_VERSION`,
-/// `CARGO_PKG_AUTHORS`, `CARGO_PKG_DESCRIPTION`.
+/// `CARGO_PKG_AUTHORS`, `CARGO_PKG_DESCRIPTION`, `CARGO_PKG_REPOSITORY`.
 /// Enabled features are indicated at build time via via cfg!().
 pub fn about() {
     let build_date = env!("BUILD_DATE");
@@ -23,6 +23,7 @@ pub fn about() {
     let build_vers = env!("CARGO_PKG_VERSION");
     let build_auth = env!("CARGO_PKG_AUTHORS");
     let build_desc = env!("CARGO_PKG_DESCRIPTION");
+    let build_repo = env!("CARGO_PKG_REPOSITORY");
     let env_no_color = std::env::var("NO_COLOR").unwrap_or_default();
 
     let features = if cfg!(feature = "metrics-exporter") {
@@ -47,7 +48,8 @@ pub fn about() {
             build_auth,
         );
         println!(
-            "{RESET}{ORANGE}'@@@@@{RESET}{WHITE}{BOLD}o{RESET}{ORANGE}@@@@@'{RESET}{WHITE}  https://github.com/PetitPrinc3/nbd"
+            "{RESET}{ORANGE}'@@@@@{RESET}{WHITE}{BOLD}o{RESET}{ORANGE}@@@@@'{RESET}{WHITE}  {}",
+            build_repo,
         );
         println!(
             "{RESET}{ORANGE}  '@@@@@@@'    {RESET}                                                  * * * /"
@@ -61,7 +63,7 @@ pub fn about() {
         println!("##   \\|/   ##  {}", build_desc,);
         println!("##    O    ##  / * * *");
         println!("##    |    ##  {}", build_auth,);
-        println!("'##   o   ##'  https://github.com/PetitPrinc3/nbd");
+        println!("'##   o   ##'  {}", build_repo,);
         println!("  '#######'                                                      * * * /");
     }
 }

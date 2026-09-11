@@ -2,7 +2,15 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "nbd", about = "Nothing But Data — the no bullshit daemon.")]
+#[command(
+    name = env!("CARGO_PKG_NAME"),
+    version = if cfg!(feature = "metrics-exporter") {
+        concat!(env!("CARGO_PKG_VERSION"), " [+metrics-exporter]")
+    } else {
+        env!("CARGO_PKG_VERSION")
+    },
+    about = "Nothing But Data — the no bullshit daemon."
+)]
 pub struct Cli {
     /// Path to the configuration file.
     #[arg(long, conflicts_with = "check_config_file")]

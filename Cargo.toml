@@ -5,6 +5,10 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["Arthur Reppelin `PetitPrinc3` (arthur.reppelin@gmail.com)"]
 description = "the no bullshit daemon."
+repository = "https://github.com/PetitPrinc3/nbd"
+readme = "README.md"
+keywords = ["multicast", "udp", "kafka", "daemon", "low-latency"]
+categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "signal", "io-util"] }
