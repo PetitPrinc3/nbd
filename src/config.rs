@@ -80,6 +80,12 @@ pub struct RawProducerConfig {
     pub connection_timeout: Option<u64>,
     pub message_timeout: Option<u64>,
     pub message_retries: Option<u16>,
+    pub compression: Option<String>,
+    pub idempotence: Option<bool>,
+    pub linger: Option<u16>,
+    pub acks: Option<String>,
+    pub queue_size: Option<u32>,
+    pub parallel_requests: Option<u16>,
 }
 
 /// Raw `[nbd]` section from the TOML configuration.
@@ -397,6 +403,12 @@ pub struct ProducerConfig {
     pub connection_timeout: u64,
     pub message_timeout: u64,
     pub message_retries: u16,
+    pub compression: String,
+    pub idempotence: bool,
+    pub linger: u16,
+    pub acks: String,
+    pub queue_size: u32,
+    pub parallel_requests: u16,
 }
 
 impl From<RawProducerConfig> for ProducerConfig {
@@ -405,7 +417,13 @@ impl From<RawProducerConfig> for ProducerConfig {
             broker: raw_producer_config.broker,
             connection_timeout: 0,
             message_timeout: 0,
-            message_retries: 0,
+            message_retries: 2,
+            compression: String::from("lz4"),
+            idempotence: true,
+            linger: 1,
+            acks: String::from("all"),
+            queue_size: 100000,
+            parallel_requests: 5,
         };
 
         match producer_config.broker.to_socket_addrs() {
@@ -458,7 +476,7 @@ impl From<RawProducerConfig> for ProducerConfig {
             }
             None => {
                 warn!(
-                    "The `nbd.kafka.message_timeout` parameter is unspecified and was replaced by a default value of `100`ms."
+                    "The `kafka.message_timeout` parameter is unspecified and was replaced by a default value of `100`ms."
                 );
                 producer_config.message_timeout = 100;
             }
@@ -470,7 +488,6 @@ impl From<RawProducerConfig> for ProducerConfig {
                     warn!(
                         "The `kafka.message_retries` parameter cannot be 0. It was increased to the default value of `2`."
                     );
-                    producer_config.message_retries = 2;
                 } else {
                     debug!("The `kafka.message_retries` parameter is configured correctly.");
                     producer_config.message_retries = value;
@@ -478,9 +495,98 @@ impl From<RawProducerConfig> for ProducerConfig {
             }
             None => {
                 warn!(
-                    "The `nbd.kafka.retries` parameter is unspecified and was replaced by a default value of `2`."
+                    "The `kafka.retries` parameter is unspecified and was replaced by a default value of `2`."
                 );
-                producer_config.message_retries = 2;
+            }
+        }
+
+        match raw_producer_config.acks {
+            Some(value) => {
+                if ["-1", "1", "0", "all"].contains(&value.as_str()) {
+                    debug!("The `kafka.acks` parameter is configured correctly.");
+                } else {
+                    warn!(
+                        "The `kafka.acks` parameter is invalid. Possible values are : 'all', '-1', '0' and '1'. It was replaced by a default value of `all`."
+                    );
+                }
+            }
+            None => {
+                warn!(
+                    "The `kafka.acks` parameter is unspecified and was replaced by a default value of `all`."
+                );
+            }
+        }
+
+        match raw_producer_config.idempotence {
+            Some(value) => {
+                debug!("The `kafka.idempotence` parameter is configured correctly.");
+                producer_config.idempotence = value;
+            }
+            None => {
+                if producer_config.acks == "all" || producer_config.acks == "-1" {
+                    warn!(
+                        "The `kafka.idempotence` parameter is unspecified and was replaced by a default value of `true`."
+                    );
+                } else {
+                    warn!(
+                        "The `kafka.compression` parameter is unspecified and was replaced by a default value of `false` because request required acks is : {}.",
+                        &producer_config.acks,
+                    );
+                }
+            }
+        }
+
+        match raw_producer_config.linger {
+            Some(value) => {
+                debug!("The `kafka.linger` parameter is configured correctly.");
+                producer_config.linger = value;
+            }
+            None => {
+                warn!(
+                    "The `kafka.linger` parameter is unspecified and was replaced by a default value of `1`ms."
+                );
+            }
+        }
+
+        match raw_producer_config.compression {
+            Some(value) => {
+                if ["none", "lz4", "gzip", "snappy", "zstd"].contains(&value.as_str()) {
+                    debug!("The `kafka.compression` parameter is configured correctly.");
+                    producer_config.compression = value;
+                } else {
+                    warn!(
+                        "The `kafka.compression` parameter is invalid. Possible values are : 'none', 'lz4', 'gzip', 'snappy' and 'zstd'. It was replaced by a default value of `lz4`."
+                    );
+                }
+            }
+            None => {
+                warn!(
+                    "The `kafka.compression` parameter is unspecified and was replaced by a default value of `lz4`."
+                );
+            }
+        }
+
+        match raw_producer_config.queue_size {
+            Some(value) => {
+                debug!("The `kafka.queue_size` parameter is configured correctly.");
+                producer_config.queue_size = value;
+            }
+            None => {
+                warn!(
+                    "The `kafka.queue_size` parameter is unspecified and was replaced by a default value of `100 000`."
+                );
+            }
+        }
+
+        match raw_producer_config.parallel_requests {
+            Some(value) => {
+                debug!("The `kafka.parallel_requests` parameter is configured correctly.");
+                producer_config.parallel_requests = value;
+            }
+            None => {
+                warn!(
+                    "The `kafka.parallel_requests` parameter is unspecified and was replaced by a default value of `5`."
+                );
             }
         }
 

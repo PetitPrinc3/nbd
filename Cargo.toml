@@ -1,6 +1,6 @@
 [package]
 name = "nbd"
-version = "0.1.0-beta"
+version = "0.1.1-beta"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["Arthur Reppelin `PetitPrinc3` (arthur.reppelin@gmail.com)"]

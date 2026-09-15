@@ -144,12 +144,18 @@ async fn main() -> Result<(), NbdError> {
             "message.send.max.retries",
             config.kafka.message_retries.to_string(),
         )
-        .set("compression.type", "lz4")
-        .set("max.in.flight.requests.per.connection", "5")
-        .set("queue.buffering.max.messages", "100000")
-        .set("enable.idempotence", "true")
-        .set("linger.ms", "0")
-        .set("acks", "all")
+        .set("compression.type", config.kafka.compression)
+        .set(
+            "max.in.flight.requests.per.connection",
+            config.kafka.parallel_requests.to_string(),
+        )
+        .set(
+            "queue.buffering.max.messages",
+            config.kafka.queue_size.to_string(),
+        )
+        .set("enable.idempotence", config.kafka.idempotence.to_string())
+        .set("linger.ms", config.kafka.linger.to_string())
+        .set("acks", config.kafka.acks)
         .create::<rdkafka::producer::FutureProducer>()
     {
         Ok(producer) => {

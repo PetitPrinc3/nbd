@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased](https://github.com/PetitPrinc3/nbd/compare/v0.1.0-beta...HEAD)
 
+- Replace hard-coded configuration values for the kafka client with configurable variables.
+
 ## [0.1.0-beta](https://github.com/PetitPrinc3/nbd/releases/tag/v0.1.0-beta) - 2026-09-11
 
 ### Added
