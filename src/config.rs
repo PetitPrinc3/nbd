@@ -110,7 +110,6 @@ pub struct RawProducerConfig {
     pub acks: Option<String>,
     pub queue_size: Option<u32>,
     pub parallel_requests: Option<u16>,
-    #[cfg(feature = "kafka-tls")]
     pub tls: Option<TlsConfig>,
     pub auth: Option<RawAuthConfig>,
 }
@@ -658,8 +657,17 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
             }
         };
 
-        #[cfg(feature = "kafka-tls")]
         match raw_producer_config.tls {
+            #[cfg(not(feature = "kafka-tls"))]
+            Some(_tls_config) => {
+                error!(
+                    "The `kafka.tls` section is present but this nbd version doesn't support it. Either compile with the `kafka-tls` feature or remove this section from your configuration file."
+                );
+                return Err(NbdError::Config(String::from(
+                    "The `kafka.tls` section is present but this nbd version doesn't support it. Either compile with the `kafka-tls` feature or remove this section from your configuration file.",
+                )));
+            }
+            #[cfg(feature = "kafka-tls")]
             Some(mut tls_config) => {
                 if tls_config.cert_file.is_some() != tls_config.key_file.is_some() {
                     error!("Incomplete tls certificate/key combination.");

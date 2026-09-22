@@ -260,18 +260,29 @@ interface = "0.0.0.0"
     let valid_raw_conf_example = toml::from_str::<RawConfig>(&valid_raw_toml_example);
     assert!(valid_raw_conf_example.is_ok());
 
-    std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o600)).unwrap();
-    std::fs::set_permissions(&conf_file, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
 
-    std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(!check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&conf_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
 
-    std::fs::set_permissions(&conf_file, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(!check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
+        std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            !check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok()
+        );
 
-    std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(!check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
+        std::fs::set_permissions(&conf_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            !check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok()
+        );
+
+        std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            !check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok()
+        );
+    }
 
     let valid_conf_example = Config::try_from(valid_raw_conf_example.unwrap());
     assert!(valid_conf_example.is_ok());
@@ -310,7 +321,7 @@ parallel_requests = 5
 
 [kafka.auth]
 username = "Dwight"
-password = {{ file = "{}" }}
+password = {{ file = '{}' }}
 mechanism = "PLAIN"
 
 [[provider]]
@@ -331,18 +342,25 @@ interface = "0.0.0.0"
 
     assert!(valid_raw_conf_example.is_ok());
 
-    std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o600)).unwrap();
-    std::fs::set_permissions(&conf_file, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&conf_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
 
-    std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(!check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
+        std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            !check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok()
+        );
 
-    std::fs::set_permissions(&conf_file, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(!check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
+        std::fs::set_permissions(&conf_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            !check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok()
+        );
 
-    std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
+        std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
+    }
 
     let valid_conf_example = Config::try_from(valid_raw_conf_example.unwrap());
     assert!(valid_conf_example.is_ok());
@@ -483,7 +501,7 @@ interface = "0.0.0.0"
 
     writeln!(source_file, "{}", invalid_raw_toml_example).unwrap();
 
-    let invalid_raw_conf_example = toml::from_str::<RawConfig>(&invalid_raw_toml_example);
+    let invalid_raw_conf_example = toml::from_str::<RawConfig>(invalid_raw_toml_example);
     assert!(!invalid_raw_conf_example.is_ok());
 
     std::fs::remove_file(&conf_file).unwrap();
