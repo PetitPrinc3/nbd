@@ -25,6 +25,7 @@ clap = { version = "4.6.6", features = ["derive"] }
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"], optional = true }
 futures = "0.3.34"
+secrecy = { version = "0.10.3", features = ["serde"] }
 
 [build-dependencies]
 chrono = "0.4.45"
@@ -36,3 +37,6 @@ strip = "symbols"
 [features]
 default = []
 metrics-exporter = ["dep:metrics", "dep:metrics-exporter-prometheus"]
+kafka-tls = ["rdkafka/ssl"]
+kafka-auth-gssapi = ["rdkafka/gssapi"]
+kafka-auth-oauth = ["rdkafka/curl"]

@@ -25,16 +25,16 @@ This document covers NBD's trust model, deployment hardening recommendations, an
 NBD's job is to relay, not to authenticate. Concretely:
 
 - **UDP multicast ingress is trusted by design.** NBD cannot — at the UDP layer — verify the source, integrity, or authenticity of the datagrams it receives. Anyone able to send to a subscribed multicast group (including via spoofed source addresses, since UDP checks nothing) can inject arbitrary payloads that NBD will forward to Kafka as-is.
-- **Kafka egress is currently trusted at the network level, not the protocol level.** See [Kafka Broker Connectivity](#kafka-broker-connectivity) — this is the single most important thing in this document.
+- **Kafka egress can be secured at the protocol level** via optional TLS and SASL features. See [Kafka Broker Connectivity](#kafka-broker-connectivity) for the feature matrix. The default build still uses plaintext — this is intentional for fully trusted environments, but must be explicitly hardened for any cross-network deployment.
 - **The daemon itself is memory-safe by construction and runs unprivileged** (no root required, all Linux capabilities dropped under the provided systemd unit). See the [ANSSI Compliance Matrix](#anssi-compliance-matrix) for exactly how far that guarantee currently extends.
 
-None of this is a flaw so much as a design decision consistent with NBD's target environment: a controlled, already-segmented production network where the multicast feed and the Kafka broker live on trusted infrastructure. But it does mean the security of an NBD deployment lives almost entirely at the network layer, not inside the daemon. Read everything below as "how to build the trusted network NBD assumes it's running on."
+None of this is a flaw so much as a design decision consistent with NBD's target environment: a controlled, already-segmented production network where the multicast feed and the Kafka broker live on trusted infrastructure. On the multicast side, the security boundary is entirely at the network layer — NBD cannot authenticate UDP senders. On the Kafka side, optional TLS and SASL features now allow hardening at the protocol level (see [Kafka Broker Connectivity](#kafka-broker-connectivity)), but only if the binary is built and configured accordingly. Read everything below as "how to build the trusted network NBD assumes it's running on," and how to layer protocol-level hardening on top of it where needed.
 
 ## Reporting a Vulnerability
 
 Report security issues privately by [email](mailto:gavrochebackups@gmail.com) rather than opening a public issue. Include a description, reproduction steps if possible, and the affected version or commit hash.
 
-This is a single-maintainer project with no dedicated security mailing list or bounty program, so response times are best-effort, not SLA-backed. Only the latest commit on `main` is supported — NBD is pre-1.0 (`0.1.0`), so there's no LTS branch and no backported patches.
+This is a single-maintainer project with no dedicated security mailing list or bounty program, so response times are best-effort, not SLA-backed. Only the latest commit on `main` is supported — NBD is pre-1.0 (`0.1.1-beta`), so there's no LTS branch and no backported patches.
 
 ## Deployment Recommendations
 
@@ -50,19 +50,25 @@ NBD subscribes to whatever multicast group its configuration points at and relay
 
 ### Kafka Broker Connectivity
 
-> [!WARNING]
-> As shipped, the `[kafka]` configuration section exposes only `broker`, `connection_timeout`, `message_timeout`, and `message_retries`. There is **no configuration surface for TLS or SASL** (`security.protocol`, `ssl.*`, `sasl.*`). `src/main.rs` only ever sets `bootstrap.servers`, the timeout/retry values, `compression.type=lz4`, `acks=all`, and `enable.idempotence=true` on the `librdkafka` client — every one of those is compatible with, and defaults to, a **plaintext, unauthenticated `PLAINTEXT` connection**. No code path currently sets anything else.
+TLS and SASL authentication are available as **optional compile-time features** rather than always-on defaults. The table below summarises the feature matrix:
 
-Practical implications:
+| Feature flag          | What it enables                                       | `security.protocol` auto-selected  |
+| --------------------- | ----------------------------------------------------- | ---------------------------------- |
+| *(none)*              | Plaintext, unauthenticated (`PLAINTEXT`)              | `plaintext`                        |
+| `kafka-tls`           | TLS encryption only (`SSL`)                           | `ssl`                              |
+| `kafka-auth-*`        | SASL authentication only, no encryption               | `sasl_plaintext`                   |
+| `kafka-tls` + `kafka-auth-*` | TLS encryption + SASL authentication (`SASL_SSL`) | `sasl_ssl`                   |
 
-- Traffic between NBD and the broker is not encrypted in transit.
-- There is no client authentication, so any host that can reach the broker's port can produce as NBD.
+NBD selects the `security.protocol` automatically based on the presence of `[kafka.tls]` and `[kafka.auth]` sections in the configuration, and warns at startup if `kafka.auth` is configured without `kafka.tls` (credentials in plaintext).
 
-Until TLS/SASL configuration is added to `[kafka]` (see [Future Hardening Roadmap](#future-hardening-roadmap)), treat the NBD-to-broker link as **at least as sensitive as the multicast feed itself**, and mitigate at the network layer:
+> [!IMPORTANT]
+> The **default build** (no feature flags) still produces a `PLAINTEXT` connection — no encryption, no authentication. This is intentional for environments that run NBD on a fully trusted, air-gapped network segment. For any deployment that crosses untrusted links, build with `--features kafka-tls` (minimum) and configure `[kafka.tls]`.
 
-- keep NBD and the broker on the same trusted, non-routable segment, or a dedicated VPN/IPsec tunnel if they must cross an untrusted network;
-- restrict the broker's listener to expected source IPs via firewall rules;
-- if your Kafka cluster enforces `SASL_SSL` for every other producer, NBD currently can't join it directly — plan for a local TLS-terminating sidecar (`stunnel`, `envoy`, etc.) if that's a hard requirement today.
+Practical guidance:
+
+- **Plaintext deployment** (trusted segment only): keep NBD and the broker on the same trusted, non-routable segment or a dedicated VPN/IPsec tunnel if they must cross an untrusted network. Restrict the broker's listener to expected source IPs via firewall rules.
+- **TLS deployment** (`kafka-tls` feature): provide `[kafka.tls]` with at minimum a `ca_file` pointing to the broker's CA certificate. Add `cert_file`/`key_file` for mutual TLS.
+- **SASL authentication**: if your Kafka cluster enforces `SASL_SSL`, build with both `kafka-tls` and the appropriate auth feature (`kafka-auth-gssapi` for Kerberos, `kafka-auth-oauth` for OAuth 2.0/OIDC, or no extra flag for PLAIN/SCRAM credentials).
 
 ### Metrics Endpoint Exposure
 
@@ -92,9 +98,11 @@ Covered in [README/Kernel Tuning](README.md#kernel-tuning). The recommended `net
 
 ### Configuration and Secrets Handling
 
-- `config.toml` currently carries no secret material — there's no credential field in the schema yet (see [Known Limitations](#known-limitations)). Once TLS/SASL support lands, treat the config file like any other credentials file: `chmod 600`, owned by the `DynamicUser`-allocated runtime user, never committed to version control.
-- `nbd --check-config-file` validates configuration without starting the daemon — use it in CI/CD or a pre-deploy step rather than validating by pointing a live run at production multicast groups.
-- Nothing in the current logging paths prints secret material, because there isn't any yet (e.g. `info!("Connecting to the Kafka broker at {} ...", config.kafka.broker)` only ever logs a host:port).
+- `config.toml` can now carry secret material when TLS or SASL authentication is configured — passwords, keys, OAuth tokens. The `SecretSource` type allows supplying them in three ways: as an inline literal, as a shell environment variable reference (`{ env = "VAR" }`), or as a path to a secrets file (`{ file = "/path/to/secret" }`). Inline literals are the least safe option — see below.
+- **Unix file permission enforcement**: at startup (both `--config-file` and `--check-config-file`), NBD checks that any file involved in secret resolution — including `config.toml` itself if it contains a literal secret, plus any `key_file`, `keytab`, or secrets file — is owner-only readable (`mode & 0o077 == 0`, i.e. `chmod 600`). NBD refuses to start if this check fails. On Windows, the check emits a warning but does not block startup (the platform does not expose POSIX permission bits).
+- **In-memory secret minimization**: immediately after the Kafka `FutureProducer` is created, NBD explicitly drops both `config.kafka` (the validated config struct) and the `ClientConfig` builder. The only remaining copies of credentials at that point are those held internally by `librdkafka` for authentication and re-authentication — NBD does not retain them.
+- `nbd --check-config-file` validates configuration (including secret resolution and file permissions) without starting the daemon — use it in CI/CD or a pre-deploy step rather than validating by pointing a live run at production infrastructure.
+- Nothing in the current logging paths emits raw secret values. `SecretString` (from the `secrecy` crate) requires an explicit `.expose_secret()` call to access the underlying string — accidental `Debug`/`Display` formatting of secrets is structurally prevented at compile time.
 
 ### Logging
 
@@ -186,11 +194,12 @@ Of the 60 rules and recommendations in the current ANSSI Secure Rust Guide check
 
 What's left is deployment-level limitations:
 
-- **No TLS/SASL configuration surface for the Kafka connection** (see [Kafka Broker Connectivity](#kafka-broker-connectivity)) — the most significant remaining gap.
+- **Default build is `PLAINTEXT`**: the standard binary (no feature flags) connects to Kafka without TLS or authentication. Operators must explicitly build with the relevant feature flags (`kafka-tls`, `kafka-auth-*`) and supply the appropriate `[kafka.tls]` / `[kafka.auth]` configuration to enable encryption and authentication.
 - **The Prometheus metrics endpoint is unauthenticated plaintext HTTP** (see [Metrics Endpoint Exposure](#metrics-endpoint-exposure)).
+- **Unix-only file permission enforcement**: the `chmod 600` check for secret-bearing files is skipped on Windows — operators must enforce equivalent access controls manually.
 
 ## Future Hardening Roadmap
 
 Roughly in priority order:
 
-1. Add a `security.protocol` / `ssl.*` / `sasl.*` configuration surface to `[kafka]`, and consider failing closed (refuse to start) if an operator hasn't explicitly opted into `PLAINTEXT`.
+1. Add authentication to the Prometheus metrics endpoint (e.g. a static bearer token or mTLS).

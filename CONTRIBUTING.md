@@ -7,7 +7,9 @@ As a single-maintainer project, PR reviews and issue responses are best-effort. 
 ## Development Environment Setup
 
 1. **Rust Toolchain**: NBD is pinned to Rust **1.97.1**. Ensure you have `rustup` installed; the toolchain will be selected automatically via `rust-toolchain.toml`.
-2. **System Dependencies (Linux/macOS)**: You need a C/C++ compiler and `cmake` for `librdkafka` compilation (pulled via `rdkafka-sys`).
+2. **System Dependencies (Linux/macOS)**: You need a C/C++ compiler and `cmake` for `librdkafka` compilation (pulled via `rdkafka-sys`). Optionally:
+   - `libsasl2-dev` (Debian/Ubuntu) — required to build the `kafka-auth-gssapi` feature (Kerberos GSSAPI).
+   - `libcurl4-openssl-dev` (Debian/Ubuntu) — required to build the `kafka-auth-oauth` feature (OAuth 2.0/OIDC).
 3. **System Dependencies (Windows)**: Building `rdkafka-sys` with the `cmake-build` feature additionally requires Perl and NASM (for the bundled OpenSSL build) and the Visual Studio Build Tools (C++ workload). If `cmake` fails to locate a dependency, check the [`rust-rdkafka` build notes](https://github.com/fede1024/rust-rdkafka) first.
 4. **Testing Infrastructure**: A local Kafka broker (or Docker/Podman for `testcontainers`) is recommended for end-to-end testing, though isolated benchmarks use in-memory mock sinks (`BenchSink`, `IPerfSink`) and need no external broker.
 
@@ -43,7 +45,7 @@ The suite also ships longer-running benchmarks (`stress`, `spike`, `multi_channe
 ```bash
 cargo test --test stress -- --nocapture                   # 5 min sustained load
 cargo test --test spike -- --nocapture                    # 10 s burst
-cargo test --test multi_channel_stress -- --nocapture      # 5-channel concurrency
+cargo test --test multi_channel_stress -- --nocapture     # 5-channel concurrency
 ```
 
 > **Heads up**: running a bare `cargo test --all-features` with no filter will attempt every test above, including the multi-minute stress tests and the `iperf`-dependent one. Expect it to take 10+ minutes and to fail unless `iperf` is already running separately.

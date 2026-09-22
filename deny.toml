@@ -42,7 +42,7 @@ targets = [
 # If true, metadata will be collected with `--all-features`. Note that this can't
 # be toggled off if true, if you want to conditionally enable `--all-features` it
 # is recommended to pass `--all-features` on the cmd line instead
-all-features = false
+all-features = true
 # If true, metadata will be collected with `--no-default-features`. The same
 # caveat with `all-features` applies
 no-default-features = false
@@ -97,7 +97,7 @@ allow = [
     #"BSD-2-Clause",
     "BSD-3-Clause",
     #"ISC",
-    #"Zlib",
+    "Zlib",
     "Unlicense",
     #"CC0-1.0",
     #"GPL-3.0-only",
@@ -199,9 +199,9 @@ deny = [
     # - iana-time-zone-haiku : chrono requirement (at build time only) 
     # - generator : prometheus exporter requirement (at build time only)
     # - rdkafka : project dependancy
-    { crate = "cc", wrappers = ["cmake", "libz-sys", "iana-time-zone-haiku"] },
+    { crate = "cc", wrappers = ["cmake", "sasl2-sys", "openssl-sys", "curl-sys", "libz-sys", "generator", "iana-time-zone-haiku"] },
     { crate = "cmake", wrappers = ["rdkafka-sys"] },
-    { crate = "pkg-config", wrappers = ["libz-sys", "rdkafka-sys"] },
+    { crate = "pkg-config", wrappers = ["libz-sys", "rdkafka-sys", "sasl2-sys", "openssl-sys", "curl-sys"] },
     { crate = "bindgen" },
 ]
 # List of features to allow/deny

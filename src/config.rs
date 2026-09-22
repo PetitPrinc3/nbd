@@ -19,8 +19,31 @@
 //! - Buffer sizes are cross-checked against `socket_buffer_size` and UDP max (65,507)
 //! - Kafka broker addresses are validated via DNS resolution
 //! - Metrics listener interfaces are probed via ephemeral UDP socket binding
+//! - `kafka.acks` is validated against the set `{all, -1, 0, 1}`
+//! - `kafka.compression` is validated against `{none, lz4, gzip, snappy, zstd}`
+//! - `kafka.parallel_requests` is capped at 5 when `kafka.idempotence = true`
+//! - `kafka.idempotence` is automatically forced to `false` when `kafka.acks` ∉ `{all, -1}`
+//! - TLS cert/key files are validated for existence and paired correctly (feature `kafka-tls`)
+//! - Kerberos keytab files are validated for existence (feature `kafka-auth-gssapi`)
+//! - OAuth token endpoint URLs warn if not using HTTPS (feature `kafka-auth-oauth`)
+//! - `security.protocol` is automatically derived from `tls`/`auth` presence:
+//!   `plaintext` | `ssl` | `sasl_plaintext` | `sasl_ssl`
+//!
+//! ## Secret handling
+//!
+//! Secrets (passwords, OAuth tokens, TLS key passwords) are typed as [`SecretSource`], which
+//! resolves values from a TOML literal, a shell environment variable (`{ env = "VAR" }`), or a
+//! file (`{ file = "/path" }`). Resolved values are wrapped in [`secrecy::SecretString`], which
+//! prevents accidental `Debug`/`Display` logging of secret material.
+//!
+//! File permission enforcement ([`check_secrets`]) runs before [`Config::try_from`]: on Unix,
+//! any file containing a literal secret or referenced as a secrets file must have permissions
+//! `0o600` (owner read/write only); NBD returns [`NbdError::Config`] and refuses to start
+//! otherwise. On non-Unix platforms the check emits a warning instead.
 
 use serde::Deserialize;
+
+use secrecy::{ExposeSecret, SecretString};
 
 use std::cmp;
 use std::fmt;
@@ -75,6 +98,7 @@ pub struct RawProviderConfig {
 
 /// Raw `[kafka]` section from the TOML configuration.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawProducerConfig {
     pub broker: String,
     pub connection_timeout: Option<u64>,
@@ -86,6 +110,9 @@ pub struct RawProducerConfig {
     pub acks: Option<String>,
     pub queue_size: Option<u32>,
     pub parallel_requests: Option<u16>,
+    #[cfg(feature = "kafka-tls")]
+    pub tls: Option<TlsConfig>,
+    pub auth: Option<RawAuthConfig>,
 }
 
 /// Raw `[nbd]` section from the TOML configuration.
@@ -118,7 +145,7 @@ pub struct Config {
 impl TryFrom<RawConfig> for Config {
     type Error = NbdError;
     fn try_from(raw_config: RawConfig) -> Result<Self, Self::Error> {
-        let kafka: ProducerConfig = ProducerConfig::from(raw_config.kafka);
+        let kafka: ProducerConfig = ProducerConfig::try_from(raw_config.kafka)?;
         let nbd: NbdConfig = match raw_config.nbd {
             Some(raw_nbd_config) => NbdConfig::try_from(raw_nbd_config)?,
             None => {
@@ -347,10 +374,11 @@ impl ProviderConfig {
             }
         }
 
+        let default_message_size = cmp::min(1500, socket_buffer_size);
+
         match raw_provider_config.message_size {
             Some(value) => {
                 if value == 0 {
-                    let default_message_size = cmp::min(1500, socket_buffer_size);
                     warn!(
                         "The `providers.{}.message_size` parameter is unspecified and was replaced by a default value of `{}`.",
                         &idx, default_message_size,
@@ -373,6 +401,7 @@ impl ProviderConfig {
                     warn!(
                         "This is most likely a missconfiguration and may cause issues if the total allocated space is bigger than the available memory. A default value of 1 500 is recommended."
                     );
+                    provider_config.message_size = default_message_size;
                 } else {
                     debug!(
                         "The `providers.{}.message_size` parameter is configured correctly.",
@@ -382,7 +411,6 @@ impl ProviderConfig {
                 };
             }
             None => {
-                let default_message_size = cmp::min(1500, socket_buffer_size);
                 warn!(
                     "The `providers.{}.message_size` parameter is unspecified and was replaced by a default value of `{}`.",
                     &idx, default_message_size,
@@ -397,7 +425,18 @@ impl ProviderConfig {
 
 /// Validated Kafka producer configuration.
 ///
-/// Controls broker connection, delivery timeouts, and retry behavior.
+/// Controls broker connection, delivery behavior, producer tuning, and
+/// optional transport security and authentication.
+///
+/// The `security_protocol` field is derived automatically:
+/// - `plaintext` — neither TLS nor auth configured
+/// - `ssl` — TLS only (feature `kafka-tls`)
+/// - `sasl_plaintext` — auth only, no TLS
+/// - `sasl_ssl` — TLS + auth (feature `kafka-tls` + `kafka-auth-*`)
+///
+/// Secret fields (`tls.key_password`, `auth` credentials) are stored as
+/// [`secrecy::SecretString`] and are explicitly dropped after the Kafka
+/// producer is created to minimise secret lifetime in memory.
 pub struct ProducerConfig {
     pub broker: String,
     pub connection_timeout: u64,
@@ -409,10 +448,14 @@ pub struct ProducerConfig {
     pub acks: String,
     pub queue_size: u32,
     pub parallel_requests: u16,
+    pub security_protocol: String,
+    pub tls: Option<TlsConfig>,
+    pub auth: Option<AuthConfig>,
 }
 
-impl From<RawProducerConfig> for ProducerConfig {
-    fn from(raw_producer_config: RawProducerConfig) -> Self {
+impl TryFrom<RawProducerConfig> for ProducerConfig {
+    type Error = NbdError;
+    fn try_from(raw_producer_config: RawProducerConfig) -> Result<Self, Self::Error> {
         let mut producer_config = ProducerConfig {
             broker: raw_producer_config.broker,
             connection_timeout: 0,
@@ -424,6 +467,9 @@ impl From<RawProducerConfig> for ProducerConfig {
             acks: String::from("all"),
             queue_size: 100000,
             parallel_requests: 5,
+            security_protocol: String::from("plaintext"),
+            tls: None,
+            auth: None,
         };
 
         match producer_config.broker.to_socket_addrs() {
@@ -459,7 +505,7 @@ impl From<RawProducerConfig> for ProducerConfig {
                 );
                 producer_config.connection_timeout = 2_000;
             }
-        }
+        };
 
         match raw_producer_config.message_timeout {
             Some(value) => {
@@ -480,7 +526,7 @@ impl From<RawProducerConfig> for ProducerConfig {
                 );
                 producer_config.message_timeout = 100;
             }
-        }
+        };
 
         match raw_producer_config.message_retries {
             Some(value) => {
@@ -498,12 +544,13 @@ impl From<RawProducerConfig> for ProducerConfig {
                     "The `kafka.retries` parameter is unspecified and was replaced by a default value of `2`."
                 );
             }
-        }
+        };
 
         match raw_producer_config.acks {
             Some(value) => {
                 if ["-1", "1", "0", "all"].contains(&value.as_str()) {
                     debug!("The `kafka.acks` parameter is configured correctly.");
+                    producer_config.acks = value;
                 } else {
                     warn!(
                         "The `kafka.acks` parameter is invalid. Possible values are : 'all', '-1', '0' and '1'. It was replaced by a default value of `all`."
@@ -515,12 +562,20 @@ impl From<RawProducerConfig> for ProducerConfig {
                     "The `kafka.acks` parameter is unspecified and was replaced by a default value of `all`."
                 );
             }
-        }
+        };
 
         match raw_producer_config.idempotence {
             Some(value) => {
-                debug!("The `kafka.idempotence` parameter is configured correctly.");
-                producer_config.idempotence = value;
+                if value && (producer_config.acks != "all" && producer_config.acks != "-1") {
+                    warn!(
+                        "The `kafka.idempotence` parameter is et to true while the acks value is {} which is incompatible. `kafka.idempotence` was automatically set to false.",
+                        producer_config.acks,
+                    );
+                    producer_config.idempotence = false;
+                } else {
+                    debug!("The `kafka.idempotence` parameter is configured correctly.");
+                    producer_config.idempotence = value;
+                }
             }
             None => {
                 if producer_config.acks == "all" || producer_config.acks == "-1" {
@@ -529,12 +584,13 @@ impl From<RawProducerConfig> for ProducerConfig {
                     );
                 } else {
                     warn!(
-                        "The `kafka.compression` parameter is unspecified and was replaced by a default value of `false` because request required acks is : {}.",
+                        "The `kafka.idempotence` parameter is unspecified and was replaced by a default value of `false` because `kafka.acks` is : {}.",
                         &producer_config.acks,
                     );
+                    producer_config.idempotence = false;
                 }
             }
-        }
+        };
 
         match raw_producer_config.linger {
             Some(value) => {
@@ -546,7 +602,7 @@ impl From<RawProducerConfig> for ProducerConfig {
                     "The `kafka.linger` parameter is unspecified and was replaced by a default value of `1`ms."
                 );
             }
-        }
+        };
 
         match raw_producer_config.compression {
             Some(value) => {
@@ -564,7 +620,7 @@ impl From<RawProducerConfig> for ProducerConfig {
                     "The `kafka.compression` parameter is unspecified and was replaced by a default value of `lz4`."
                 );
             }
-        }
+        };
 
         match raw_producer_config.queue_size {
             Some(value) => {
@@ -576,21 +632,218 @@ impl From<RawProducerConfig> for ProducerConfig {
                     "The `kafka.queue_size` parameter is unspecified and was replaced by a default value of `100 000`."
                 );
             }
-        }
+        };
 
         match raw_producer_config.parallel_requests {
             Some(value) => {
-                debug!("The `kafka.parallel_requests` parameter is configured correctly.");
-                producer_config.parallel_requests = value;
+                if producer_config.idempotence {
+                    if value <= 5 {
+                        debug!("The `kafka.parallel_requests` parameter is configured correctly.");
+                        producer_config.parallel_requests = value;
+                    } else {
+                        warn!(
+                            "The `kafka.parallel_requests` parameter is set to {} while idempotence is enabled which requires parallel_requests to be lower than 5. It was replaced by a default value of `5`.",
+                            value
+                        );
+                    }
+                } else {
+                    debug!("The `kafka.parallel_requests` parameter is configured correctly.");
+                    producer_config.parallel_requests = value;
+                }
             }
             None => {
                 warn!(
                     "The `kafka.parallel_requests` parameter is unspecified and was replaced by a default value of `5`."
                 );
             }
-        }
+        };
 
-        producer_config
+        #[cfg(feature = "kafka-tls")]
+        match raw_producer_config.tls {
+            Some(mut tls_config) => {
+                if tls_config.cert_file.is_some() != tls_config.key_file.is_some() {
+                    error!("Incomplete tls certificate/key combination.");
+                    return Err(NbdError::Config(format!(
+                        "Incomplete tls certificate/key combination : key ({}) / cert ({})",
+                        tls_config.key_file.is_some(),
+                        tls_config.cert_file.is_some()
+                    )));
+                }
+
+                if !tls_config.ca_file.is_file() {
+                    error!(
+                        "Certificate authority file {} doesn't exist.",
+                        tls_config.ca_file.display()
+                    );
+                    return Err(NbdError::Config(format!(
+                        "Certificate authority file {} doesn't exist.",
+                        tls_config.ca_file.display()
+                    )));
+                }
+
+                if let Some(path) = &tls_config.cert_file
+                    && !path.is_file()
+                {
+                    error!("Certificate file {} doesn't exist.", path.display());
+                    return Err(NbdError::Config(format!(
+                        "Certificate file {} doesn't exist.",
+                        path.display()
+                    )));
+                }
+
+                if let Some(path) = &tls_config.key_file
+                    && !path.is_file()
+                {
+                    error!("Key file {} doesn't exist.", path.display());
+                    return Err(NbdError::Config(format!(
+                        "Key file {} doesn't exist.",
+                        path.display()
+                    )));
+                }
+
+                if let Some(ref key_password) = tls_config.key_password
+                    && let Ok(ref key_secret) = key_password.resolve()
+                {
+                    if key_secret.expose_secret().is_empty() {
+                        return Err(NbdError::Config(String::from(
+                            "The `kafka.tls.key_password` parameters cannot be empty.",
+                        )));
+                    } else {
+                        tls_config.key_password = Some(SecretSource::Literal(key_secret.clone()));
+                    }
+                }
+
+                if tls_config.key_password.is_some() && tls_config.key_file.is_none() {
+                    warn!(
+                        "The `kafka.tls.key_password` parameter is set while the `kafka.tls.key_file` is not configured."
+                    );
+                }
+
+                debug!("The `kafka.tls` parameter is configured correctly.");
+                producer_config.tls = Some(tls_config);
+            }
+            None => {
+                debug!("The `kafka.tls` parameter is not configured.");
+            }
+        };
+
+        match raw_producer_config.auth {
+            Some(RawAuthConfig::RawCredentials(value)) => {
+                debug!("The `kafka.auth` section is configured.");
+
+                let resolved_user = match value.username.resolve() {
+                    Ok(username) => username,
+                    Err(e) => {
+                        error!("{}", e);
+                        return Err(e);
+                    }
+                };
+                let resolved_pass = match value.password.resolve() {
+                    Ok(password) => password,
+                    Err(e) => {
+                        error!("{}", e);
+                        return Err(e);
+                    }
+                };
+
+                if resolved_user.expose_secret().is_empty()
+                    || resolved_pass.expose_secret().is_empty()
+                {
+                    return Err(NbdError::Config(String::from(
+                        "The `kafka.auth.username` and `kafka.auth.password` parameters cannot be empty.",
+                    )));
+                }
+
+                let mut producer_authconfig = Credentials {
+                    username: resolved_user,
+                    password: resolved_pass,
+                    mechanism: SecurityMechanism::Plain,
+                };
+
+                match value.mechanism {
+                    Some(m) => {
+                        producer_authconfig.mechanism = m;
+                    }
+                    None => {
+                        warn!(
+                            "The `kafka.auth.mechanism` parameter is not configured. A default value of `PLAIN` will be used. This is not a recommended behavior. "
+                        );
+                    }
+                }
+
+                producer_config.auth = Some(AuthConfig::Credentials(producer_authconfig));
+            }
+            #[cfg(feature = "kafka-auth-gssapi")]
+            Some(RawAuthConfig::Kerberos(value)) => {
+                debug!("The `kafka.auth.gssapi` section is configured.");
+
+                if !value.gssapi.keytab.is_file() {
+                    error!(
+                        "Keytab file {} doesn't exist.",
+                        value.gssapi.keytab.display()
+                    );
+                    return Err(NbdError::Config(format!(
+                        "Keytab file {} doesn't exist.",
+                        value.gssapi.keytab.display()
+                    )));
+                }
+
+                producer_config.auth = Some(AuthConfig::Kerberos(Kerberos {
+                    principal: value.gssapi.principal,
+                    keytab: value.gssapi.keytab,
+                    service_name: value.gssapi.service_name,
+                }));
+            }
+            #[cfg(feature = "kafka-auth-oauth")]
+            Some(RawAuthConfig::OAuth(mut value)) => {
+                debug!("The `kafka.auth.oauth` section is configured.");
+
+                if !value.oauth.token_endpoint_url.starts_with("https://") {
+                    warn!(
+                        "The `kafka.auth.oauth.token_endpoint_url` parameter isn't secured (not https). This is not recommended behavior."
+                    );
+                }
+
+                if let Ok(client_secret) = value.oauth.client_secret.resolve() {
+                    if client_secret.expose_secret().is_empty() || value.oauth.client_id.is_empty()
+                    {
+                        return Err(NbdError::Config(String::from(
+                            "The `kafka.auth.oauth.client_id` and `kafka.auth.oauth.client_secret` parameters cannot be empty.",
+                        )));
+                    } else {
+                        value.oauth.client_secret = SecretSource::Literal(client_secret);
+                    }
+                }
+
+                producer_config.auth = Some(AuthConfig::OAuth(OAuth {
+                    token_endpoint_url: value.oauth.token_endpoint_url,
+                    client_id: value.oauth.client_id,
+                    client_secret: value.oauth.client_secret,
+                    scope: value.oauth.scope,
+                    extensions: value.oauth.extensions,
+                }));
+            }
+            None => {
+                debug!("The `kafka.auth` section is not configured.");
+            }
+        };
+
+        producer_config.security_protocol = match (
+            producer_config.tls.is_some(),
+            producer_config.auth.is_some(),
+        ) {
+            (true, true) => String::from("sasl_ssl"),
+            (true, false) => String::from("ssl"),
+            (false, true) => {
+                warn!(
+                    "The `kafka.tls` section is not configured while `kafka.auth` is configured. Plaintext secrets could be intercepted on the network. This is not recommended behavior."
+                );
+                String::from("sasl_plaintext")
+            }
+            (false, false) => String::from("plaintext"),
+        };
+
+        Ok(producer_config)
     }
 }
 
@@ -751,4 +1004,253 @@ impl fmt::Display for VerbosityLevels {
 pub enum Interface {
     V4(Ipv4Addr),
     V6(u32),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum RawAuthConfig {
+    RawCredentials(RawCredentials),
+    #[cfg(feature = "kafka-auth-gssapi")]
+    Kerberos(KerberosConfigWrapper),
+    #[cfg(feature = "kafka-auth-oauth")]
+    OAuth(OAuthConfigWrapper),
+}
+
+pub enum AuthConfig {
+    Credentials(Credentials),
+    #[cfg(feature = "kafka-auth-gssapi")]
+    Kerberos(Kerberos),
+    #[cfg(feature = "kafka-auth-oauth")]
+    OAuth(OAuth),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    pub ca_file: PathBuf,
+    pub cert_file: Option<PathBuf>,
+    pub key_file: Option<PathBuf>,
+    pub key_password: Option<SecretSource>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawCredentials {
+    pub username: SecretSource,
+    pub password: SecretSource,
+    pub mechanism: Option<SecurityMechanism>,
+}
+
+#[derive(Debug)]
+pub struct Credentials {
+    pub username: SecretString,
+    pub password: SecretString,
+    pub mechanism: SecurityMechanism,
+}
+
+#[derive(Debug, Deserialize)]
+pub enum SecurityMechanism {
+    #[serde(rename = "PLAIN")]
+    Plain,
+    #[cfg(feature = "kafka-tls")]
+    #[serde(rename = "SCRAM-SHA-256")]
+    ScramSha256,
+    #[cfg(feature = "kafka-tls")]
+    #[serde(rename = "SCRAM-SHA-512")]
+    ScramSha512,
+}
+
+impl SecurityMechanism {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Plain => "PLAIN",
+            #[cfg(feature = "kafka-tls")]
+            Self::ScramSha256 => "SCRAM-SHA-256",
+            #[cfg(feature = "kafka-tls")]
+            Self::ScramSha512 => "SCRAM-SHA-512",
+        }
+    }
+}
+
+#[cfg(feature = "kafka-auth-gssapi")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KerberosConfigWrapper {
+    gssapi: Kerberos,
+}
+
+#[cfg(feature = "kafka-auth-oauth")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthConfigWrapper {
+    oauth: OAuth,
+}
+
+#[cfg(feature = "kafka-auth-gssapi")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Kerberos {
+    pub principal: String,
+    pub keytab: PathBuf,
+    pub service_name: String,
+}
+
+#[cfg(feature = "kafka-auth-oauth")]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuth {
+    pub token_endpoint_url: String,
+    pub client_id: String,
+    pub client_secret: SecretSource,
+    pub scope: Option<String>,
+    pub extensions: Option<String>,
+}
+
+#[cfg(unix)]
+fn check_file_permissions(path: &std::path::Path) -> Result<(), NbdError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = std::fs::metadata(path)
+        .map_err(|e| NbdError::Config(format!("Cannot read {} : {e}", path.display())))?
+        .permissions()
+        .mode();
+
+    if mode & 0o077 != 0 {
+        return Err(NbdError::Config(format!(
+            "Invalid permissions on {} while containing secrets ({:04o}).",
+            path.display(),
+            mode & 0o777
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_file_permissions(path: &std::path::Path) -> Result<(), NbdError> {
+    warn!(
+        "Cannot verify the permissions of {} on this platform. Make sure it is only readable by intended users.",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Validates file permissions for all secret-bearing paths in the Kafka configuration.
+///
+/// Must be called **before** [`Config::try_from`]. On Unix, any file that either
+/// *contains* a literal secret (triggering a check on `config_path` itself) or is
+/// *referenced* as a secrets file must have permissions `0o600` (owner read/write only).
+/// Returns [`NbdError::Config`] and prevents startup if any file is group- or
+/// world-readable. On non-Unix platforms the check emits a warning instead.
+pub fn check_secrets(
+    kafka_config: &RawProducerConfig,
+    config_path: &std::path::Path,
+) -> Result<(), NbdError> {
+    match &kafka_config.auth {
+        Some(RawAuthConfig::RawCredentials(creds)) => {
+            if creds.password.is_literal() {
+                check_file_permissions(config_path)?;
+            }
+
+            if let Some(secrets_file) = creds.password.file_path() {
+                check_file_permissions(secrets_file)?;
+            }
+        }
+
+        #[cfg(feature = "kafka-auth-oauth")]
+        Some(RawAuthConfig::OAuth(oauth)) => {
+            if oauth.oauth.client_secret.is_literal() {
+                check_file_permissions(config_path)?;
+            }
+
+            if let Some(secrets_file) = oauth.oauth.client_secret.file_path() {
+                check_file_permissions(secrets_file)?;
+            }
+        }
+
+        #[cfg(feature = "kafka-auth-gssapi")]
+        Some(RawAuthConfig::Kerberos(value)) => {
+            check_file_permissions(&value.gssapi.keytab)?;
+        }
+
+        None => {}
+    }
+
+    #[cfg(feature = "kafka-tls")]
+    if let Some(ref tls_config) = kafka_config.tls {
+        if let Some(key_password) = &tls_config.key_password {
+            if key_password.is_literal() {
+                check_file_permissions(config_path)?;
+            }
+
+            if let Some(secrets_file) = key_password.file_path() {
+                check_file_permissions(secrets_file)?;
+            }
+        }
+
+        if let Some(key_file) = &tls_config.key_file {
+            check_file_permissions(key_file)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// A TOML-deserialisable secret value accepted in three forms:
+///
+/// ```toml
+/// # Inline literal — config file must be chmod 600 on Unix
+/// password = "my-secret"
+///
+/// # Shell environment variable resolved at startup
+/// password = { env = "MY_SECRET_VAR" }
+///
+/// # Path to a secrets file — file must be chmod 600 on Unix
+/// password = { file = "/run/secrets/my_secret" }
+/// ```
+///
+/// Resolved values are wrapped in [`secrecy::SecretString`], which prevents
+/// accidental `Debug`/`Display` formatting of secret material at compile time.
+/// Use [`SecretSource::resolve`] to obtain the underlying [`secrecy::SecretString`].
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum SecretSource {
+    Env { env: String },
+    File { file: PathBuf },
+    Literal(SecretString),
+}
+
+impl SecretSource {
+    pub fn resolve(&self) -> Result<SecretString, NbdError> {
+        match self {
+            SecretSource::Literal(value) => Ok(value.clone()),
+            SecretSource::Env { env: var } => {
+                let val = std::env::var(var).map_err(|e| {
+                    NbdError::Config(format!(
+                        "Unable to read secret from variable {} : {}",
+                        var, e
+                    ))
+                })?;
+                Ok(SecretString::from(val))
+            }
+            SecretSource::File { file: path } => match std::fs::read_to_string(path) {
+                Ok(value) => Ok(SecretString::from(value.trim())),
+                Err(e) => Err(NbdError::Config(format!(
+                    "Unable to read secret from file {} : {}",
+                    path.display(),
+                    e
+                ))),
+            },
+        }
+    }
+
+    pub fn is_literal(&self) -> bool {
+        matches!(self, SecretSource::Literal(_))
+    }
+
+    pub fn file_path(&self) -> Option<&std::path::Path> {
+        if let SecretSource::File { file: path } = self {
+            return Some(path);
+        }
+        None
+    }
 }

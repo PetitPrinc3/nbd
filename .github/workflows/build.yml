@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  build-linux:
 
     runs-on: ubuntu-latest
 
@@ -21,6 +21,17 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libcurl4-openssl-dev libsasl2-dev
     - name: Format
-      run: cargo fmt
+      run: cargo fmt -- --check
     - name: Build
       run: cargo build --release --all-features
+  
+  build-windows:
+
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Run tests
+      run: cargo test
+    - name: Build
+      run: cargo build --release --features metrics-exporter

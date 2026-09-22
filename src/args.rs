@@ -4,11 +4,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = env!("CARGO_PKG_NAME"),
-    version = if cfg!(feature = "metrics-exporter") {
-        concat!(env!("CARGO_PKG_VERSION"), " [+metrics-exporter]")
-    } else {
-        env!("CARGO_PKG_VERSION")
-    },
+    version = env!("BUILD_VERSION_FULL"),
     about = "Nothing But Data — the no bullshit daemon."
 )]
 pub struct Cli {
