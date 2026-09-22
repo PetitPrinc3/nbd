@@ -77,9 +77,7 @@ async fn main() -> std::process::ExitCode {
 ///
 /// Returns [`Ok(())`] upon clean exit or an [`NbdError`] if a fatal startup,
 /// configuration, or runtime error occurs.
-async fn run(
-    reload_handle: LogReloadHandle,
-) -> Result<(), NbdError> {
+async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
     let args = Cli::parse();
 
     if args.about {
