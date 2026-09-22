@@ -3,8 +3,8 @@
 //! NBD daemon entry point.
 //!
 //! Orchestrates the full application lifecycle:
-//! 1. Parse CLI arguments ([`Cli`])
-//! 2. Initialize dynamic log filtering via `tracing_subscriber::reload`
+//! 1. Initialize dynamic log filtering via `tracing_subscriber::reload`
+//! 2. Parse CLI arguments ([`Cli`])
 //! 3. Install a custom panic hook that routes panics to structured `tracing::error!` logs
 //! 4. Parse and validate the TOML configuration ([`RawConfig`] → [`Config`])
 //! 5. Start the optional Prometheus metrics exporter (feature-gated)
@@ -42,15 +42,15 @@ use args::Cli;
 mod about;
 use about::about;
 
+type LogReloadHandle = tracing_subscriber::reload::Handle<EnvFilter, tracing_subscriber::Registry>;
+
+/// Application entry point and top-level error boundary.
+///
+/// Initializes the global [`tracing`] subscriber and log reload layer, delegates the
+/// daemon lifecycle execution to [`run`], and formats any fatal [`NbdError`] through
+/// structured logging before returning an appropriate [`ExitCode`].
 #[tokio::main]
-async fn main() -> Result<(), NbdError> {
-    let args = Cli::parse();
-
-    if args.about {
-        about();
-        return Ok(());
-    }
-
+async fn main() -> std::process::ExitCode {
     let (filter_layer, reload_handle) = reload::Layer::new(
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
     );
@@ -59,6 +59,33 @@ async fn main() -> Result<(), NbdError> {
         .with(filter_layer)
         .with(fmt::layer().compact())
         .init();
+
+    match run(reload_handle).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!("{e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Executes the core daemon lifecycle and task orchestration.
+///
+/// Handles CLI parsing, configuration loading, panic hooks, optional metrics
+/// exporter initialization, Kafka connection checks, provider task spawning,
+/// signal handling, and graceful shutdown.
+///
+/// Returns [`Ok(())`] upon clean exit or an [`NbdError`] if a fatal startup,
+/// configuration, or runtime error occurs.
+async fn run(
+    reload_handle: LogReloadHandle,
+) -> Result<(), NbdError> {
+    let args = Cli::parse();
+
+    if args.about {
+        about();
+        return Ok(());
+    }
 
     std::panic::set_hook(Box::new(|info| {
         tracing::error!("panic : {info}");
@@ -345,11 +372,11 @@ async fn main() -> Result<(), NbdError> {
     match task_termination(listener_tasks).await {
         Ok(_) => {
             info!("NBD exited gracefully.");
-            return Ok(());
+            Ok(())
         }
         Err(e) => {
             error!("Failed to stop gracefully : {}", e);
-            return Err(e);
+            Err(e)
         }
     }
 }

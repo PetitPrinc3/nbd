@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Explicit `drop` of `kafka_config` and `config.kafka` after producer creation to minimize secret retention in memory.
 - GitHub Actions release pipeline (`release.yml`): compiles Linux and Windows binaries (standard and `with_metrics` variants) on every version tag push, and uploads them to the corresponding GitHub Release.
 
+### Changed
+
+- Errors that cause the process to exit are now logged through `tracing` (with the usual timestamp/level formatting) using their `Display` representation instead of the raw `Debug` dump previously printed by the Rust runtime — e.g. TOML parsing errors now keep their line/column context and source snippet instead of showing the internal error struct.
+
 ## [0.1.0-beta](https://github.com/PetitPrinc3/nbd/releases/tag/v0.1.0-beta) - 2026-09-11
 
 ### Added

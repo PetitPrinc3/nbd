@@ -24,7 +24,7 @@ pub enum NbdError {
     Network(#[from] std::io::Error),
 
     /// TOML deserialization error from the configuration file.
-    #[error("Toml error : {}", .0.message())]
+    #[error("Invalid TOML configuration: {0}")]
     Toml(#[from] toml::de::Error),
 
     /// Kafka client or delivery error from `librdkafka`.
