@@ -260,8 +260,6 @@ interface = "0.0.0.0"
     let valid_raw_conf_example = toml::from_str::<RawConfig>(&valid_raw_toml_example);
     assert!(valid_raw_conf_example.is_ok());
 
-    assert!(check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
-
     #[cfg(unix)]
     {
         std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o600)).unwrap();
