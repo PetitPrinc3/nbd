@@ -19,7 +19,6 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use rdkafka::config::ClientConfig;
 use rdkafka::producer::Producer;
 
 use tracing::{debug, error, info, warn};
@@ -27,14 +26,12 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt, reload};
 
-use secrecy::ExposeSecret;
-
 #[cfg(feature = "metrics-exporter")]
 use metrics_exporter_prometheus::PrometheusBuilder;
 
 use clap::Parser;
 
-use nbd::{AuthConfig, Config, NbdError, Provider, RawConfig, check_secrets};
+use nbd::{Config, NbdError, Provider, RawConfig, build_producer, check_secrets};
 
 mod args;
 use args::Cli;
@@ -164,92 +161,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
         config.kafka.broker
     );
 
-    let mut kafka_config = ClientConfig::new();
-
-    // TLS config application
-    if let Some(ref tls_config) = config.kafka.tls {
-        kafka_config.set("ssl.ca.location", tls_config.ca_file.display().to_string());
-        if let Some(cert_file) = &tls_config.cert_file {
-            kafka_config.set("ssl.certificate.location", cert_file.display().to_string());
-        }
-        if let Some(key_file) = &tls_config.key_file {
-            kafka_config.set("ssl.key.location", key_file.display().to_string());
-        }
-        if let Some(key_password) = &tls_config.key_password {
-            kafka_config.set("ssl.key.password", key_password.resolve()?.expose_secret());
-        }
-    };
-
-    // Authentication config application
-    kafka_config.set(
-        "security.protocol",
-        config.kafka.security_protocol.to_string(),
-    );
-
-    if let Some(ref auth_config) = config.kafka.auth {
-        match auth_config {
-            AuthConfig::Credentials(credentials) => {
-                kafka_config.set("sasl.mechanism", credentials.mechanism.as_str());
-                kafka_config.set("sasl.username", credentials.username.expose_secret());
-                kafka_config.set("sasl.password", credentials.password.expose_secret());
-            }
-            #[cfg(feature = "kafka-auth-gssapi")]
-            AuthConfig::Kerberos(kerberos) => {
-                kafka_config.set("sasl.mechanism", "GSSAPI");
-                kafka_config.set("sasl.kerberos.principal", &kerberos.principal);
-                kafka_config.set(
-                    "sasl.kerberos.keytab",
-                    kerberos.keytab.display().to_string(),
-                );
-                kafka_config.set("sasl.kerberos.service.name", &kerberos.service_name);
-            }
-            #[cfg(feature = "kafka-auth-oauth")]
-            AuthConfig::OAuth(oauth) => {
-                kafka_config.set("sasl.mechanism", "OAUTHBEARER");
-                kafka_config.set("sasl.oauthbearer.method", "oidc");
-                kafka_config.set("sasl.oauthbearer.client.id", &oauth.client_id);
-                kafka_config.set(
-                    "sasl.oauthbearer.client.secret",
-                    oauth.client_secret.resolve()?.expose_secret(),
-                );
-                kafka_config.set(
-                    "sasl.oauthbearer.token.endpoint.url",
-                    &oauth.token_endpoint_url,
-                );
-                if let Some(scope) = &oauth.scope {
-                    kafka_config.set("sasl.oauthbearer.scope", scope);
-                }
-                if let Some(extensions) = &oauth.extensions {
-                    kafka_config.set("sasl.oauthbearer.extensions", extensions);
-                }
-            }
-        }
-    };
-
-    let kafka_producer = match kafka_config
-        .set("bootstrap.servers", &config.kafka.broker)
-        .set(
-            "message.timeout.ms",
-            config.kafka.message_timeout.to_string(),
-        )
-        .set(
-            "message.send.max.retries",
-            config.kafka.message_retries.to_string(),
-        )
-        .set("compression.type", config.kafka.compression.to_string())
-        .set(
-            "max.in.flight.requests.per.connection",
-            config.kafka.parallel_requests.to_string(),
-        )
-        .set(
-            "queue.buffering.max.messages",
-            config.kafka.queue_size.to_string(),
-        )
-        .set("enable.idempotence", config.kafka.idempotence.to_string())
-        .set("linger.ms", config.kafka.linger.to_string())
-        .set("acks", config.kafka.acks.to_string())
-        .create::<rdkafka::producer::FutureProducer>()
-    {
+    let kafka_producer = match build_producer(&config.kafka) {
         Ok(producer) => {
             match producer
                 .client()
@@ -273,7 +185,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
         Err(e) => {
             error!("A fatal error occured : {}", e);
             cancel_token.cancel();
-            return Err(NbdError::Kafka(e));
+            return Err(e);
         }
     };
 
@@ -281,7 +193,6 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
     // This ensures that unnecessary copies of the secrets are not kept in memory.
     // The only remaining secrets become the ones stored by librdkafka and required for authentication and reauthentication.
     drop(config.kafka);
-    drop(kafka_config);
 
     for mut provider in providers {
         let task_tk = cancel_token.clone();

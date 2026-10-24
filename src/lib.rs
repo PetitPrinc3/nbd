@@ -38,13 +38,16 @@
 
 mod config;
 mod errors;
+mod kafka;
 mod providers;
 mod sinks;
 
 pub use config::{
-    AuthConfig, Config, Credentials, Interface, ProviderConfig, RawConfig, RawCredentials,
-    SecretSource, SecurityMechanism, check_secrets,
+    AuthConfig, Config, Credentials, Interface, ProducerConfig, ProviderConfig, RawConfig,
+    RawCredentials, SecretSource, SecurityMechanism, check_secrets,
 };
+
 pub use errors::NbdError;
+pub use kafka::build_producer;
 pub use providers::Provider;
 pub use sinks::{BenchSink, IPerfSink, MessageSink};

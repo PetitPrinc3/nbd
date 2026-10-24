@@ -46,4 +46,7 @@ pub enum NbdError {
     /// Backpressure error returned when a message sink buffer or transmission queue is full.
     #[error("{0}")]
     Backpressure(String),
+
+    #[error("Kafka producer recovery error : {0}")]
+    Recovery(String),
 }

@@ -56,76 +56,87 @@ pub trait MessageSink: Clone + Send + 'static {
 /// end-to-end latency is computed in the transaction future by extracting the transmit timestamp
 /// from payload bytes `[4..12]` (iperf-compatible header: `u32` seconds + `u32` microseconds)
 /// and recording the delta in the `nbd_e2e_latency` Prometheus histogram.
+pub(crate) type KafkaTransaction =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), NbdError>> + Send>>;
+
 impl MessageSink for FutureProducer {
     type Transaction =
         std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), NbdError>> + Send>>;
 
     fn submit(&self, topic: Arc<str>, payload: Bytes) -> Result<Self::Transaction, NbdError> {
-        let record: FutureRecord<[u8], [u8]> = FutureRecord::to(&topic).payload(&payload);
-        match self.send_result(record) {
-            Ok(delivery_future) => {
-                Ok(Box::pin(async move {
-                    match delivery_future.await {
-                        Ok(Ok(_offset_info)) => {
-                            #[cfg(feature = "metrics-exporter")]
-                            {
-                                // This section is only used for testing by computing latencies for the end-to-end test.
-                                //    if payload.len() > 12 {
-                                //        let ts_rx = SystemTime::now();
+        submit_on(self, topic, payload)
+    }
+}
 
-                                //        //let pkt_idx = u32::from_be_bytes(payload[..4].try_into().unwrap());
+pub(crate) fn submit_on(
+    producer: &FutureProducer,
+    topic: Arc<str>,
+    payload: Bytes,
+) -> Result<KafkaTransaction, NbdError> {
+    let record: FutureRecord<[u8], [u8]> = FutureRecord::to(&topic).payload(&payload);
+    match producer.send_result(record) {
+        Ok(delivery_future) => {
+            Ok(Box::pin(async move {
+                match delivery_future.await {
+                    Ok(Ok(_offset_info)) => {
+                        #[cfg(feature = "metrics-exporter")]
+                        {
+                            // This section is only used for testing by computing latencies for the end-to-end test.
+                            //    if payload.len() > 12 {
+                            //        let ts_rx = SystemTime::now();
 
-                                //        let ts_tx =
-                                //            u32::from_be_bytes(payload[4..8].try_into().unwrap())
-                                //                as u64;
-                                //        let ts_tx_micros = (ts_tx * 1_000_000
-                                //            + (u32::from_be_bytes(payload[8..12].try_into().unwrap())
-                                //                as u64))
-                                //            as u128;
-                                //        let ts_rx_micros =
-                                //            ts_rx.duration_since(UNIX_EPOCH).unwrap().as_micros();
-                                //        let latency =
-                                //            Duration::from_micros((ts_rx_micros - ts_tx_micros) as u64);
+                            //        //let pkt_idx = u32::from_be_bytes(payload[..4].try_into().unwrap());
 
-                                //        metrics::histogram!("nbd_e2e_latency").record(latency);
-                                //    };
-                                metrics::counter!("nbd_kafka_sent_total", "topic" => topic.clone())
-                                    .increment(1);
-                            }
+                            //        let ts_tx =
+                            //            u32::from_be_bytes(payload[4..8].try_into().unwrap())
+                            //                as u64;
+                            //        let ts_tx_micros = (ts_tx * 1_000_000
+                            //            + (u32::from_be_bytes(payload[8..12].try_into().unwrap())
+                            //                as u64))
+                            //            as u128;
+                            //        let ts_rx_micros =
+                            //            ts_rx.duration_since(UNIX_EPOCH).unwrap().as_micros();
+                            //        let latency =
+                            //            Duration::from_micros((ts_rx_micros - ts_tx_micros) as u64);
 
-                            debug!("Successfully sent some message on topic {} !", &topic);
-
-                            Ok(())
-                        }
-                        Ok(Err((e, _msg))) => {
-                            #[cfg(feature = "metrics-exporter")]
-                            metrics::counter!("nbd_errors_kafka_total", "topic" => topic.clone())
+                            //        metrics::histogram!("nbd_e2e_latency").record(latency);
+                            //    };
+                            metrics::counter!("nbd_kafka_sent_total", "topic" => topic.clone())
                                 .increment(1);
+                        }
 
-                            warn!("Failed to send one message on topic {} : {}", &topic, e);
-                            Err(NbdError::Kafka(e))
-                        }
-                        Err(_canceled) => {
-                            warn!(
-                                "Producer canceled before send confirmation for one message on topic {}.",
-                                &topic
-                            );
-                            Err(NbdError::Backpressure(format!(
-                                "Failed to send one message on topic {} because the producer was cancelled.",
-                                topic
-                            )))
-                        }
+                        debug!("Successfully sent some message on topic {} !", &topic);
+
+                        Ok(())
                     }
-                }))
-            }
-            Err((KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull), _record)) => {
-                Err(NbdError::Backpressure(format!(
-                    "Failed to send one message on topic {} because the queue is full.",
-                    topic
-                )))
-            }
-            Err((e, _record)) => Err(NbdError::Kafka(e)),
+                    Ok(Err((e, _msg))) => {
+                        #[cfg(feature = "metrics-exporter")]
+                        metrics::counter!("nbd_errors_kafka_total", "topic" => topic.clone())
+                            .increment(1);
+
+                        warn!("Failed to send one message on topic {} : {}", &topic, e);
+                        Err(NbdError::Kafka(e))
+                    }
+                    Err(_canceled) => {
+                        warn!(
+                            "Producer canceled before send confirmation for one message on topic {}.",
+                            &topic
+                        );
+                        Err(NbdError::Backpressure(format!(
+                            "Failed to send one message on topic {} because the producer was cancelled.",
+                            topic
+                        )))
+                    }
+                }
+            }))
         }
+        Err((KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull), _record)) => {
+            Err(NbdError::Backpressure(format!(
+                "Failed to send one message on topic {} because the queue is full.",
+                topic
+            )))
+        }
+        Err((e, _record)) => Err(NbdError::Kafka(e)),
     }
 }
 
