@@ -102,6 +102,7 @@ pub struct RawProviderConfig {
 pub struct RawProducerConfig {
     pub broker: String,
     pub connection_timeout: Option<u64>,
+    pub recovery_timeout: Option<u64>,
     pub message_timeout: Option<u64>,
     pub message_retries: Option<u16>,
     pub compression: Option<String>,
@@ -439,6 +440,7 @@ impl ProviderConfig {
 pub struct ProducerConfig {
     pub broker: String,
     pub connection_timeout: u64,
+    pub recovery_timeout: u64,
     pub message_timeout: u64,
     pub message_retries: u16,
     pub compression: String,
@@ -458,6 +460,7 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
         let mut producer_config = ProducerConfig {
             broker: raw_producer_config.broker,
             connection_timeout: 0,
+            recovery_timeout: 0,
             message_timeout: 0,
             message_retries: 2,
             compression: String::from("lz4"),
@@ -500,9 +503,36 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
             }
             None => {
                 warn!(
-                    "The `nbd.kafka.connection_timeout` parameter is unspecified and was replaced by a default value of `2000`ms."
+                    "The `kafka.connection_timeout` parameter is unspecified and was replaced by a default value of `2000`ms."
                 );
                 producer_config.connection_timeout = 2_000;
+            }
+        };
+
+        match raw_producer_config.recovery_timeout {
+            Some(0) => {
+                warn!(
+                    "The `kafka.recovery_timeout` parameter cannot be `0`. It was replaced by a default value of `600 000`ms (10 mins)."
+                );
+                producer_config.recovery_timeout = 600_000;
+            }
+            Some(value) => {
+                if value < 10_000 {
+                    warn!(
+                        "The `kafka.recovery_timeout` parameter is low ({}ms). It is recommended to increase it to at least 10 seconds, depending on your infrastructure and network reliability.",
+                        value
+                    );
+                } else {
+                    debug!("The `kafka.recovery_timeout` parameter is configured correctly.");
+                };
+
+                producer_config.recovery_timeout = value;
+            }
+            None => {
+                warn!(
+                    "The `kafka.recovery_timeout` parameter is unspecified and was replaced by a default value of `600 000`ms (10 mins)."
+                );
+                producer_config.recovery_timeout = 600_000;
             }
         };
 

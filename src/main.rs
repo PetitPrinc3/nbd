@@ -31,7 +31,10 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 
 use clap::Parser;
 
-use nbd::{Config, NbdError, Provider, RawConfig, build_producer, check_secrets};
+use nbd::{
+    Config, ManagedProducer, NbdError, Provider, RawConfig, RecoveryPolicy, build_producer,
+    check_secrets, producer_factory, wait_for_retired_producers,
+};
 
 mod args;
 use args::Cli;
@@ -189,6 +192,19 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
         }
     };
 
+    let recovery_policy = RecoveryPolicy::new(Duration::from_millis(config.kafka.recovery_timeout));
+    let producer_manager = ManagedProducer::new(kafka_producer);
+    let factory = producer_factory(config_path);
+
+    let mut supervisor_manager = producer_manager.clone();
+    let supervisor_token = cancel_token.clone();
+
+    let mut supervisor_task = tokio::spawn(async move {
+        supervisor_manager
+            .supervise(recovery_policy, factory, supervisor_token)
+            .await
+    });
+
     // Dropping unnecessary copies of the Kafka configuration.
     // This ensures that unnecessary copies of the secrets are not kept in memory.
     // The only remaining secrets become the ones stored by librdkafka and required for authentication and reauthentication.
@@ -196,7 +212,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
 
     for mut provider in providers {
         let task_tk = cancel_token.clone();
-        let task_producer = kafka_producer.clone();
+        let task_producer = producer_manager.clone();
 
         listener_tasks.spawn(async move {
             match provider.subscribe(&config.nbd.socket_buffer_size) {
@@ -225,6 +241,8 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
 
     info!("NBD started successfully and is ready to accept incoming traffic.");
 
+    let mut process_error: Option<NbdError> = None;
+
     #[cfg(unix)]
     tokio::select! {
         _ = ctrl_c => { info!("Received Ctrl+C signal, stopping NBD."); cancel_token.cancel(); }
@@ -238,6 +256,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
                 Ok(Err(e)) => {
                     error!("A fatal error occured with one or more listener : {}", e);
                     error!("NBD will now try to stop gracefully.");
+                    process_error = Some(e);
                     cancel_token.cancel();
                 }
                 Err(e) => {
@@ -246,6 +265,30 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
                     } else {
                         warn!("A listener was cancelled : {}", e);
                     }
+                    process_error = Some(NbdError::TaskPanic(e));
+                    cancel_token.cancel();
+                }
+            }
+        }
+        res = &mut supervisor_task => {
+            match res {
+                Ok(Ok(())) => {
+                    debug!("The supervisor stopped gracefully.");
+                },
+                Ok(Err(e)) => {
+                    error!("A fatal error occured with the supervisor : {}", e);
+                    error!("NBD will now try to stop gracefully.");
+                    process_error = Some(e);
+                    cancel_token.cancel();
+                }
+                Err(e) => {
+                    if e.is_panic() {
+                        error!("NBD panicked while supervising the Kafka producer : {}", e);
+                    } else {
+                        error!("The producer was cancelled : {}", e);
+                        error!("NBD will now try to stop gracefully.");
+                    }
+                    process_error = Some(NbdError::TaskPanic(e));
                     cancel_token.cancel();
                 }
             }
@@ -264,6 +307,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
                 Ok(Err(e)) => {
                     error!("A fatal error occured with one or more listener : {}", e);
                     error!("NBD will now try to stop gracefully.");
+                    process_error = Some(e);
                     cancel_token.cancel();
                 }
                 Err(e) => {
@@ -272,21 +316,97 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
                     } else {
                         warn!("A listener was cancelled : {}", e);
                     }
+                    process_error = Some(NbdError::TaskPanic(e));
+                    cancel_token.cancel();
+                }
+            }
+        }
+        res = &mut supervisor_task => {
+            match res {
+                Ok(Ok(())) => {
+                    debug!("The supervisor stopped gracefully.");
+                },
+                Ok(Err(e)) => {
+                    error!("A fatal error occured with the supervisor : {}", e);
+                    error!("NBD will now try to stop gracefully.");
+                    process_error = Some(e);
+                    cancel_token.cancel();
+                }
+                Err(e) => {
+                    if e.is_panic() {
+                        error!("NBD panicked while supervising the Kafka producer : {}", e);
+                    } else {
+                        error!("The producer was cancelled : {}", e);
+                        error!("NBD will now try to stop gracefully.");
+                    }
+                    process_error = Some(NbdError::TaskPanic(e));
                     cancel_token.cancel();
                 }
             }
         }
     }
 
-    match task_termination(listener_tasks).await {
+    let listener_termination = match task_termination(listener_tasks).await {
         Ok(_) => {
-            info!("NBD exited gracefully.");
+            info!("All listeners were stoped gracefully.");
             Ok(())
         }
         Err(e) => {
-            error!("Failed to stop gracefully : {}", e);
+            error!("Failed to terminnate some listeners : {}", e);
             Err(e)
         }
+    };
+
+    let supervisor_termination = if !supervisor_task.is_finished() {
+        match tokio::time::timeout(Duration::from_secs(5), &mut supervisor_task).await {
+            Ok(Ok(Ok(()))) => {
+                info!("Supervisor task stoped gracefully.");
+                Ok(())
+            }
+            Ok(Ok(Err(e))) => {
+                warn!("The supervisor task failed : {}", e);
+                Err(e)
+            }
+            Ok(Err(e)) => {
+                warn!("The supervisor task failed : {}", e);
+                Err(NbdError::TaskPanic(e))
+            }
+            Err(e) => {
+                error!("Failed to terminate the supervisor task gracefully : {e}");
+                Err(NbdError::Termination(String::from(
+                    "Failed to terminate the supervisor task gracefully.",
+                )))
+            }
+        }
+    } else {
+        Ok(())
+    };
+
+    drop(producer_manager);
+
+    let producer_termination = match wait_for_retired_producers(Duration::from_secs(5)) {
+        Ok(()) => {
+            info!("All producers were stoped gracefully.");
+            Ok(())
+        }
+        Err(e) => {
+            error!("Failed to terminate some producers : {}", e);
+            Err(e)
+        }
+    };
+
+    match listener_termination {
+        Ok(_) => match producer_termination {
+            Ok(()) => match supervisor_termination {
+                Ok(()) => match process_error {
+                    Some(e) => Err(e),
+                    None => Ok(()),
+                },
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
     }
 }
 

@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased](https://github.com/PetitPrinc3/nbd/compare/v0.1.1-beta...HEAD)
 
+- Upgrade `Rust` to the latest stable version.
+- Better Kafka errors handling allowing broken connections to self repair by recreating the connection.
+
 ## [0.1.1-beta](https://github.com/PetitPrinc3/nbd/compare/v0.1.0-beta...v0.1.1-beta) - 2026-09-22
 
 ### Added

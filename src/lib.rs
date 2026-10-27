@@ -48,6 +48,8 @@ pub use config::{
 };
 
 pub use errors::NbdError;
-pub use kafka::build_producer;
+pub use kafka::{
+    ManagedProducer, RecoveryPolicy, build_producer, producer_factory, wait_for_retired_producers,
+};
 pub use providers::Provider;
 pub use sinks::{BenchSink, IPerfSink, MessageSink};

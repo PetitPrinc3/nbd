@@ -141,6 +141,7 @@ verbosity = "info"
 [kafka]
 broker = "192.168.1.100:9092"
 connection_timeout = 5000
+recovery_timeout = 600000
 message_timeout = 6000
 message_retries = 2
 
@@ -180,6 +181,7 @@ Apache Kafka producer configuration.
 | -------------------- | -------- | ------------ | ----------------------------------------------------------------------------------------------------------------- |
 | `broker`             | `string` | **required** | Kafka broker address as `<ip>:<port>` or `<hostname>:<port>`. Validated via DNS resolution.                       |
 | `connection_timeout` | `u64`    | `2000`       | Connection timeout in ms. Values < 500 ms trigger a warning.                                                      |
+| `recovery_timeout`   | `u64`    | `600000`     | Maximum time (ms) NBD keeps trying to recreate the Kafka producer when recreation fails, before exiting with an error. `0` is replaced by the default. Values < 10 000 ms trigger a warning: NBD exits quickly if Kafka stays unreachable. |
 | `message_timeout`    | `u64`    | `100`        | Per-message delivery timeout in ms. Values < 10 ms trigger a warning.                                             |
 | `message_retries`    | `u16`    | `2`          | Number of delivery retries. Cannot be zero.                                                                       |
 | `compression`        | `string` | `"lz4"`      | Compression codec: `none`, `lz4`, `gzip`, `snappy`, `zstd`.                                                      |
