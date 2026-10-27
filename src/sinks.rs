@@ -12,7 +12,9 @@
 
 use bytes::Bytes;
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use tracing::{debug, warn};
@@ -21,9 +23,17 @@ use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::producer::FutureProducer;
 use rdkafka::producer::FutureRecord;
 
+use arc_swap::ArcSwap;
+
 use crate::errors::NbdError;
 
 const UNIX_EPOCH: SystemTime = SystemTime::UNIX_EPOCH;
+
+static LOG_CLOCK: OnceLock<Instant> = OnceLock::new();
+static LOG_LOCKS: LazyLock<ArcSwap<HashMap<Arc<str>, Arc<AtomicU64>>>> =
+    LazyLock::new(|| ArcSwap::from_pointee(HashMap::new()));
+static LOG_WRITER: Mutex<()> = Mutex::new(());
+const LOG_THRESHOLD: u64 = 1;
 
 /// Trait abstracting the non-blocking submission and asynchronous delivery confirmation of a message.
 ///
@@ -111,10 +121,52 @@ pub(crate) fn submit_on(
                     }
                     Ok(Err((e, _msg))) => {
                         #[cfg(feature = "metrics-exporter")]
-                        metrics::counter!("nbd_errors_kafka_total", "topic" => topic.clone())
+                        metrics::counter!("nbd_errors_kafka_transmission_total", "topic" => topic.clone())
                             .increment(1);
 
-                        warn!("Failed to send one message on topic {} : {}", &topic, e);
+                        let elapsed: u64 = LOG_CLOCK.get_or_init(Instant::now).elapsed().as_secs();
+                        let log_locks = LOG_LOCKS.load();
+
+                        match log_locks.get(&topic) {
+                            Some(seconds) => {
+                                let resolved_seconds = seconds.load(Ordering::Relaxed);
+                                if elapsed.saturating_sub(resolved_seconds) >= LOG_THRESHOLD
+                                    && seconds
+                                        .compare_exchange(
+                                            resolved_seconds,
+                                            elapsed,
+                                            Ordering::Relaxed,
+                                            Ordering::Relaxed,
+                                        )
+                                        .is_ok()
+                                {
+                                    warn!("Failed to send one message on topic {} : {}", &topic, e);
+                                }
+                            }
+                            None => {
+                                let is_new = {
+                                    let _writer =
+                                        LOG_WRITER.lock().unwrap_or_else(|e| e.into_inner());
+                                    let current = LOG_LOCKS.load();
+                                    if current.contains_key(&topic) {
+                                        false
+                                    } else {
+                                        let mut copy = HashMap::clone(&current);
+                                        copy.insert(
+                                            topic.clone(),
+                                            Arc::new(AtomicU64::new(elapsed)),
+                                        );
+                                        LOG_LOCKS.store(Arc::new(copy));
+                                        true
+                                    }
+                                };
+
+                                if is_new {
+                                    warn!("Failed to send one message on topic {} : {}", &topic, e);
+                                }
+                            }
+                        }
+
                         Err(NbdError::Kafka(e))
                     }
                     Err(_canceled) => {
@@ -122,6 +174,7 @@ pub(crate) fn submit_on(
                             "Producer canceled before send confirmation for one message on topic {}.",
                             &topic
                         );
+
                         Err(NbdError::Backpressure(format!(
                             "Failed to send one message on topic {} because the producer was cancelled.",
                             topic

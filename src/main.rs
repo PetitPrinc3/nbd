@@ -348,11 +348,11 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
 
     let listener_termination = match task_termination(listener_tasks).await {
         Ok(_) => {
-            info!("All listeners were stoped gracefully.");
+            info!("All listeners were stopped gracefully.");
             Ok(())
         }
         Err(e) => {
-            error!("Failed to terminnate some listeners : {}", e);
+            error!("Failed to terminate some listeners : {}", e);
             Err(e)
         }
     };
@@ -360,7 +360,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
     let supervisor_termination = if !supervisor_task.is_finished() {
         match tokio::time::timeout(Duration::from_secs(5), &mut supervisor_task).await {
             Ok(Ok(Ok(()))) => {
-                info!("Supervisor task stoped gracefully.");
+                info!("Supervisor task stopped gracefully.");
                 Ok(())
             }
             Ok(Ok(Err(e))) => {
@@ -386,7 +386,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
 
     let producer_termination = match wait_for_retired_producers(Duration::from_secs(5)) {
         Ok(()) => {
-            info!("All producers were stoped gracefully.");
+            info!("All producers were stopped gracefully.");
             Ok(())
         }
         Err(e) => {

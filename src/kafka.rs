@@ -41,7 +41,7 @@ fn reaper() -> &'static Sender<ReaperTargets> {
                     ReaperTargets::Target(target) => {
                         let start = Instant::now();
                         drop(target);
-                        debug!("Dropped producer in {}ms;", start.elapsed().as_millis())
+                        debug!("Dropped producer in {}ms.", start.elapsed().as_millis())
                     }
                     ReaperTargets::Completion(sender) => {
                         let _ = sender.send(());
@@ -51,7 +51,7 @@ fn reaper() -> &'static Sender<ReaperTargets> {
         }) {
             Ok(_) => {},
             Err(e) => {
-                warn!("Failed to create the cleaner thread: {}. Expect increased latency and data loss in the event of a fatal failure from the Kafka broker", e);
+                warn!("Failed to create the cleaner thread: {}. Expect increased latency and data loss in the event of a fatal failure from the Kafka broker.", e);
             }
         }
         tx
@@ -206,6 +206,13 @@ impl ManagedProducer {
     pub fn new(producer: FutureProducer) -> Self {
         reaper();
 
+        #[cfg(feature = "metrics-exporter")]
+        {
+            metrics::counter!("nbd_kafka_recreation_total").increment(0);
+            metrics::counter!("nbd_errors_kafka_fatal_total").increment(0);
+            metrics::gauge!("nbd_kafka_producer_generation").set(0.0);
+        }
+
         ManagedProducer {
             container: Arc::new(ProducerContainer {
                 cell: ArcSwap::from_pointee(ProducerCell {
@@ -257,6 +264,9 @@ impl ManagedProducer {
                     cell.generation, reason
                 );
 
+                #[cfg(feature = "metrics-exporter")]
+                metrics::counter!("nbd_errors_kafka_fatal_total").increment(1);
+
                 if last_generation.is_none_or(|t| t.elapsed() > policy.stability_threshold) {
                     stability_indicator = 0;
                 } else {
@@ -291,12 +301,12 @@ impl ManagedProducer {
 
                     if since.elapsed() >= policy.give_up_after {
                         error!(
-                            "Failed to recreate a connection with the Kafka broker. Giving up after {:?}. (policy)",
+                            "Failed to recreate a connection with the Kafka broker. Giving up after {:?}. (policy `kafka.recovery_timeout`)",
                             policy.give_up_after
                         );
 
                         return Err(NbdError::Recovery(format!(
-                            "Failed to recreate a connection with the Kafka broker : {e}. Giving up after {:?}. (policy)",
+                            "Failed to recreate a connection with the Kafka broker : {e}. Giving up after {:?}. (policy `kafka.recovery_timeout`)",
                             policy.give_up_after
                         )));
                     }
@@ -304,7 +314,7 @@ impl ManagedProducer {
                     generation_errors = generation_errors.saturating_add(1);
 
                     error!(
-                        "An error occured while recreating a connection with the Kafka broker (attempt {}) : {}",
+                        "An error occurred while recreating a connection with the Kafka broker (attempt {}) : {}",
                         generation_errors, e
                     );
                     warn!(
@@ -325,7 +335,7 @@ impl ManagedProducer {
                 // Swap broken producer with new one
                 self.container.cell.swap(Arc::new(ProducerCell {
                     producer: Some(new_producer),
-                    generation: cell.generation + 1,
+                    generation: cell.generation.saturating_add(1),
                     faulted: AtomicBool::new(false),
                 }));
 
@@ -339,6 +349,13 @@ impl ManagedProducer {
                     detected.elapsed(),
                     errors
                 );
+
+                #[cfg(feature = "metrics-exporter")]
+                {
+                    metrics::counter!("nbd_kafka_recreation_total").increment(1);
+                    metrics::gauge!("nbd_kafka_producer_generation")
+                        .set(self.container.cell.load().generation as f64);
+                }
 
                 // Store generation instant
                 last_generation = Some(Instant::now());
@@ -384,54 +401,43 @@ pub type ProducerFactory = Arc<dyn Fn() -> Result<FutureProducer, NbdError> + Se
 pub fn producer_factory(config_path: PathBuf) -> ProducerFactory {
     Arc::new(move || {
         let raw_config = match std::fs::read_to_string(&config_path) {
-            Ok(content) => {
-                let raw_config = match toml::from_str::<RawConfig>(&content) {
-                    Ok(config) => config,
-                    Err(e) => {
-                        let span = e.span();
+            Ok(content) => match toml::from_str::<RawConfig>(&content) {
+                Ok(config) => config,
+                Err(e) => {
+                    let span = e.span();
 
-                        match span {
-                            Some(range) => {
-                                let error = content[0..range.start].split("\n");
+                    match span {
+                        Some(range) if let Some(before) = content.get(..range.start) => {
+                            let span = before.split("\n");
 
-                                let line = error.clone().count();
-                                let col = match error.last() {
-                                    Some(line) => line.len(),
-                                    None => 0,
-                                };
+                            let line = span.clone().count();
+                            let col = match span.last() {
+                                Some(line) => line.chars().count() + 1,
+                                None => 0,
+                            };
 
-                                error!(
-                                    "The configuration file under {} is no longer valid (line {}, column {}).",
-                                    config_path.display(),
-                                    line,
-                                    col
-                                );
-                            }
-                            None => {
-                                error!(
-                                    "The configuration file under {} is no longer valid.",
-                                    config_path.display()
-                                );
-                            }
+                            return Err(NbdError::Config(format!(
+                                "The configuration file under {} is no longer valid (line {}, column {}). Run `nbd --check-config-file {}` to see the details.",
+                                config_path.display(),
+                                line,
+                                col,
+                                config_path.display(),
+                            )));
                         }
-
-                        error!(
-                            "Run `nbd --check-config-file {}` to see the details.",
-                            config_path.display()
-                        );
-
-                        return Err(NbdError::Config(format!(
-                            "The configuration file under {} is no longer valid.",
-                            config_path.display()
-                        )));
+                        _ => {
+                            return Err(NbdError::Config(format!(
+                                "The configuration file under {} is no longer valid. Run `nbd --check-config-file {}` to see the details.",
+                                config_path.display(),
+                                config_path.display(),
+                            )));
+                        }
                     }
-                };
-
-                raw_config
-            }
+                }
+            },
             Err(e) => {
                 return Err(NbdError::Config(format!(
-                    "An error occured while parsing the configuration file : {}",
+                    "Failed to read the configuration file under {} : {}",
+                    config_path.display(),
                     e
                 )));
             }
