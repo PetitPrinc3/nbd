@@ -129,3 +129,6 @@ Once the 2.5 Gb/s link is taken into account, measured throughput consistently l
 
 > [!NOTE] 
 > Enabling the `metrics-exporter` feature adds overhead and can reduce measured performance. Its use is discouraged in environments that don't require this visibility — especially when running against a large number of providers under heavy network load, close to hardware saturation.
+
+> [!NOTE]
+> The internal latency tests above use in-memory sinks (`BenchSink`, `IPerfSink`), which bypass the Kafka egress. This includes the `ManagedProducer` that wraps the Kafka producer in production: it performs one lock-free `ArcSwap` load for every submitted message, and runs a supervisor task and a producer-reaper thread in the background. Only an end-to-end test exercises that path.

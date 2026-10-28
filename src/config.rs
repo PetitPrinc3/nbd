@@ -21,6 +21,8 @@
 //! - Metrics listener interfaces are probed via ephemeral UDP socket binding
 //! - `kafka.acks` is validated against the set `{all, -1, 0, 1}`
 //! - `kafka.compression` is validated against `{none, lz4, gzip, snappy, zstd}`
+//! - `kafka.recovery_timeout` defaults to `600 000` ms (10 minutes), `0` is replaced by that default
+//!   and values below `10 000` ms trigger a warning
 //! - `kafka.parallel_requests` is capped at 5 when `kafka.idempotence = true`
 //! - `kafka.idempotence` is automatically forced to `false` when `kafka.acks` ∉ `{all, -1}`
 //! - TLS cert/key files are validated for existence and paired correctly (feature `kafka-tls`)
@@ -102,6 +104,8 @@ pub struct RawProviderConfig {
 pub struct RawProducerConfig {
     pub broker: String,
     pub connection_timeout: Option<u64>,
+    /// Maximum time, in milliseconds, spent trying to recreate a faulted Kafka producer.
+    /// Unset or `0` is replaced by the default, see [`ProducerConfig::recovery_timeout`].
     pub recovery_timeout: Option<u64>,
     pub message_timeout: Option<u64>,
     pub message_retries: Option<u16>,
@@ -437,9 +441,21 @@ impl ProviderConfig {
 /// Secret fields (`tls.key_password`, `auth` credentials) are stored as
 /// [`secrecy::SecretString`] and are explicitly dropped after the Kafka
 /// producer is created to minimise secret lifetime in memory.
+///
+/// The configuration dropped at startup is not reused to recreate a producer after a fatal
+/// error. The `[kafka]` section is instead parsed and validated again from the configuration
+/// file, and its secrets resolved again, into a temporary `ProducerConfig` that is dropped as soon
+/// as the new producer is built. See [`producer_factory`](crate::producer_factory).
 pub struct ProducerConfig {
     pub broker: String,
     pub connection_timeout: u64,
+    /// Maximum time, in milliseconds, the supervisor keeps failing to recreate a faulted
+    /// producer before giving up. The daemon then exits with [`NbdError::Recovery`]. Never `0`:
+    /// the default is `600 000` (10 minutes).
+    ///
+    /// Building a producer does not wait for the broker, so this budget is consumed by failures of
+    /// the rebuild itself (unreadable or invalid configuration, unresolvable secrets, rejected
+    /// TLS/SASL material), not by an unreachable broker. See [`ManagedProducer`](crate::ManagedProducer).
     pub recovery_timeout: u64,
     pub message_timeout: u64,
     pub message_retries: u16,

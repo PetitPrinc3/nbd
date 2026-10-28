@@ -6,8 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased](https://github.com/PetitPrinc3/nbd/compare/v0.1.1-beta...HEAD)
 
-- Upgrade `Rust` to the latest stable version.
-- Better Kafka errors handling allowing broken connections to self repair by recreating the connection.
+### Added
+
+- Self-healing Kafka producer: the production sink is now a `ManagedProducer`, supervised by a task that replaces the `librdkafka` producer with a fresh one when it raises a fatal error. Listeners keep their handle and no restart is needed. The replaced producers are destroyed on a dedicated `nbd-kafka-reaper` thread, off the hot path.
+- `kafka.recovery_timeout` parameter (default `600000` ms; `0` is replaced by the default, values below `10000` ms trigger a warning): how long NBD keeps failing to rebuild the producer before exiting with an error. Attempts are spaced out with an exponential back-off (1 s to 60 s).
+- Prometheus metrics (`metrics-exporter` feature): `nbd_errors_kafka_fatal_total`, `nbd_kafka_recreation_total` and `nbd_kafka_producer_generation`.
+- Public API: `ManagedProducer`, `RecoveryPolicy`, `build_producer`, `producer_factory`, `wait_for_retired_producers`, `ProducerConfig` and the `NbdError::Recovery` variant.
+- Documentation of the Kafka producer recovery in `README.md`, `SECURITY.md` and the `cargo doc` API documentation.
+
+### Changed
+
+- **Metrics:** `nbd_errors_kafka_total` is renamed `nbd_errors_kafka_transmission_total`. Update the dashboards and alerts that use the old name.
+- Kafka delivery failure warnings are limited to one per topic and per second, so that a broker outage cannot flood the logs. `nbd_errors_kafka_transmission_total` still counts every failure.
+- The Kafka producer is built by `build_producer` (extracted from `main.rs`).
+- Shutdown now also stops the supervisor and waits for the retired producers, each stage being bounded to 5 seconds like the listeners drain. The final `NBD exited gracefully.` log line is replaced by one line per stage (`All listeners were stopped gracefully.`, `Supervisor task stopped gracefully.`, `All producers were stopped gracefully.`).
+- The daemon exits with an error, after its graceful shutdown, if the producer supervisor fails or gives up.
+- Upgrade `Rust` from `1.97.1` to `1.99.1`.
+- New dependency: `arc-swap`.
+- Fixed the name of the `kafka.connection_timeout` parameter in its default-value warning (it read `nbd.kafka.connection_timeout`).
 
 ## [0.1.1-beta](https://github.com/PetitPrinc3/nbd/compare/v0.1.0-beta...v0.1.1-beta) - 2026-09-22
 

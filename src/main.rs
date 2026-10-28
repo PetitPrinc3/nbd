@@ -8,10 +8,19 @@
 //! 3. Install a custom panic hook that routes panics to structured `tracing::error!` logs
 //! 4. Parse and validate the TOML configuration ([`RawConfig`] → [`Config`])
 //! 5. Start the optional Prometheus metrics exporter (feature-gated)
-//! 6. Pre-flight Kafka broker connectivity check via `fetch_metadata`
-//! 7. Spawn one async listener task per provider in a [`JoinSet`]
-//! 8. Monitor signals (Ctrl+C, SIGTERM on Unix) and task health for graceful shutdown
-//! 9. Drain all in-flight tasks with a 5-second timeout via [`task_termination`]
+//! 6. Create the Kafka producer ([`build_producer`]) and run a pre-flight broker connectivity
+//!    check via `fetch_metadata`
+//! 7. Wrap the producer in a [`ManagedProducer`] and spawn its supervisor, which recreates the
+//!    producer after a fatal error (see [`RecoveryPolicy`])
+//! 8. Spawn one async listener task per provider in a [`JoinSet`]
+//! 9. Monitor signals (Ctrl+C, SIGTERM on Unix) and the health of the listeners and of the
+//!    supervisor for graceful shutdown
+//! 10. Shut down in order, each stage with a 5-second timeout: drain the listeners via
+//!     [`task_termination`], stop the supervisor, drop the managed producer, then wait for the
+//!     retired producers to be destroyed via [`wait_for_retired_producers`]
+//!
+//! If a listener or the supervisor fails, or if a shutdown stage fails, the daemon exits with an
+//! error once the shutdown sequence is over.
 
 use std::path::PathBuf;
 use std::time::Duration;

@@ -47,6 +47,15 @@ pub enum NbdError {
     #[error("{0}")]
     Backpressure(String),
 
+    /// Kafka producer recovery failure.
+    ///
+    /// Returned in two situations:
+    ///
+    /// - the supervisor could not rebuild a faulted producer within the configured
+    ///   `kafka.recovery_timeout` and gave up (the daemon then exits with an error);
+    /// - a message was submitted while no producer was available.
+    ///
+    /// See [`ManagedProducer`](crate::ManagedProducer) for the recovery mechanism.
     #[error("Kafka producer recovery error : {0}")]
     Recovery(String),
 }

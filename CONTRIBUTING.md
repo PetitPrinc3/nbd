@@ -6,7 +6,7 @@ As a single-maintainer project, PR reviews and issue responses are best-effort. 
 
 ## Development Environment Setup
 
-1. **Rust Toolchain**: NBD is pinned to Rust **1.97.1**. Ensure you have `rustup` installed; the toolchain will be selected automatically via `rust-toolchain.toml`.
+1. **Rust Toolchain**: NBD is pinned to Rust **1.99.1**. Ensure you have `rustup` installed; the toolchain will be selected automatically via `rust-toolchain.toml`.
 2. **System Dependencies (Linux/macOS)**: You need a C/C++ compiler and `cmake` for `librdkafka` compilation (pulled via `rdkafka-sys`). Optionally:
    - `libsasl2-dev` (Debian/Ubuntu) — required to build the `kafka-auth-gssapi` feature (Kerberos GSSAPI).
    - `libcurl4-openssl-dev` (Debian/Ubuntu) — required to build the `kafka-auth-oauth` feature (OAuth 2.0/OIDC).
@@ -40,7 +40,7 @@ cargo test --lib --all-features
 cargo test --test simple_latency -- --nocapture
 ```
 
-The suite also ships longer-running benchmarks (`stress`, `spike`, `multi_channel_stress`) and one that depends on an external `iperf` process (`multi_channel_iperf_stress`). These are **not** required to pass a PR — run them manually if your change touches the hot path (`providers.rs`, `sinks.rs`):
+The suite also ships longer-running benchmarks (`stress`, `spike`, `multi_channel_stress`) and one that depends on an external `iperf` process (`multi_channel_iperf_stress`). These are **not** required to pass a PR — run them manually if your change touches the hot path (`providers.rs`, `sinks.rs`, `kafka.rs`):
 
 ```bash
 cargo test --test stress -- --nocapture                   # 5 min sustained load
@@ -66,7 +66,7 @@ cargo audit
 3. Update the documentation (`README.md`, `SECURITY.md`, etc.) if you change user-facing behavior, configuration schemas, or compliance boundaries.
 4. Keep the PR description clear: what does this fix/add, and how was it tested?
 5. Ensure the GitHub Actions pipelines (`audit.yml` and `build.yml`) pass.
-6. If your change touches the ingestion, buffering, or egress path (`providers.rs`, `sinks.rs`), include your test results along with internal-process and end-to-end latency evaluations (`stress`/`spike` output). This isn't required for documentation, configuration, or CLI-only changes.
+6. If your change touches the ingestion, buffering, or egress path (`providers.rs`, `sinks.rs`, `kafka.rs`), include your test results along with internal-process and end-to-end latency evaluations (`stress`/`spike` output). This isn't required for documentation, configuration, or CLI-only changes.
 
 ## Vulnerability Reporting
 

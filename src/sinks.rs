@@ -6,7 +6,10 @@
 //!
 //! ## Implementations
 //!
-//! - [`FutureProducer`](rdkafka::producer::FutureProducer) — Production sink delivering messages to Kafka.
+//! - [`ManagedProducer`](crate::ManagedProducer) — Production sink delivering messages to Kafka.
+//!   It wraps a [`FutureProducer`] and replaces it when the producer raises a fatal error.
+//! - [`FutureProducer`] — The plain Kafka sink that [`ManagedProducer`](crate::ManagedProducer)
+//!   builds on. It does not recover from a fatal error.
 //! - [`BenchSink`] — In-memory sink for internal latency benchmarking with nanosecond timestamps.
 //! - [`IPerfSink`] — Mock sink parsing standard iperf UDP packets for packet loss and latency analysis.
 
@@ -29,10 +32,18 @@ use crate::errors::NbdError;
 
 const UNIX_EPOCH: SystemTime = SystemTime::UNIX_EPOCH;
 
+/// Time reference of the delivery failure log throttling, set when the first failure happens.
 static LOG_CLOCK: OnceLock<Instant> = OnceLock::new();
+/// Throttle state of the delivery failure logs: for each topic, the second (counted from
+/// [`LOG_CLOCK`]) at which a failure was last logged.
+///
+/// Copy-on-write map behind an [`ArcSwap`], so that the usual path is a lock-free read. It holds
+/// one entry per topic, so its size is bounded by the topics of the configured providers.
 static LOG_LOCKS: LazyLock<ArcSwap<HashMap<Arc<str>, Arc<AtomicU64>>>> =
     LazyLock::new(|| ArcSwap::from_pointee(HashMap::new()));
+/// Serializes the insertion of a new topic in [`LOG_LOCKS`].
 static LOG_WRITER: Mutex<()> = Mutex::new(());
+/// Minimum delay, in seconds, between two logged delivery failures for the same topic.
 const LOG_THRESHOLD: u64 = 1;
 
 /// Trait abstracting the non-blocking submission and asynchronous delivery confirmation of a message.
@@ -58,17 +69,32 @@ pub trait MessageSink: Clone + Send + 'static {
     fn submit(&self, topic: Arc<str>, payload: Bytes) -> Result<Self::Transaction, NbdError>;
 }
 
-/// Production [`MessageSink`] implementation that delivers messages to a Kafka broker
-/// via `rdkafka::FutureProducer`.
-///
-/// Submits messages non-blockingly using `send_result`. If the librdkafka producer queue is full,
-/// immediately returns [`NbdError::Backpressure`]. When the `metrics-exporter` feature is enabled,
-/// end-to-end latency is computed in the transaction future by extracting the transmit timestamp
-/// from payload bytes `[4..12]` (iperf-compatible header: `u32` seconds + `u32` microseconds)
-/// and recording the delta in the `nbd_e2e_latency` Prometheus histogram.
+/// Delivery confirmation future returned for a Kafka message.
 pub(crate) type KafkaTransaction =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), NbdError>> + Send>>;
 
+/// Plain Kafka [`MessageSink`] delivering messages to a broker through
+/// [`FutureProducer`].
+///
+/// Submits messages non-blockingly using `send_result`. If the librdkafka producer queue is full,
+/// immediately returns [`NbdError::Backpressure`]; any other error raised while enqueuing, such as
+/// a fatal producer error, is returned as [`NbdError::Kafka`].
+///
+/// The returned [`Transaction`](MessageSink::Transaction) future resolves when the broker has
+/// answered:
+///
+/// - on success, it yields `Ok(())` and, with the `metrics-exporter` feature, increments
+///   `nbd_kafka_sent_total` for the topic;
+/// - on a delivery failure, it yields [`NbdError::Kafka`] and, with the `metrics-exporter`
+///   feature, increments `nbd_errors_kafka_transmission_total` for the topic. The matching
+///   warning is logged at most once per second and per topic, so that a broker outage cannot
+///   flood the logs: without the metrics exporter, the occurrences that are not logged are not
+///   counted anywhere;
+/// - if the delivery is canceled before any confirmation arrives (typically because the producer
+///   was destroyed), it yields [`NbdError::Backpressure`] and logs a warning each time.
+///
+/// This sink does not recover from a fatal producer error. The daemon uses
+/// [`ManagedProducer`](crate::ManagedProducer) instead, which builds on it.
 impl MessageSink for FutureProducer {
     type Transaction =
         std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), NbdError>> + Send>>;
@@ -78,6 +104,14 @@ impl MessageSink for FutureProducer {
     }
 }
 
+/// Enqueues a message on `producer` and returns the future that confirms its delivery.
+///
+/// Shared implementation of [`MessageSink::submit`] for the plain [`FutureProducer`] sink and for
+/// [`ManagedProducer`](crate::ManagedProducer). The errors and the semantics of the returned
+/// future are those documented on the `MessageSink` implementation of [`FutureProducer`].
+///
+/// The delivery failure warning is throttled to one per topic every [`LOG_THRESHOLD`] seconds,
+/// see [`LOG_LOCKS`].
 pub(crate) fn submit_on(
     producer: &FutureProducer,
     topic: Arc<str>,

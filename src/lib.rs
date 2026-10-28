@@ -7,12 +7,28 @@
 //!
 //! ## Architecture
 //!
-//! The library is organized around four core areas:
+//! The library is organized around five core areas:
 //!
 //! - **Configuration** ([`Config`], [`RawConfig`]) — Two-stage TOML configuration parsing and validation.
 //! - **Error handling** ([`NbdError`]) — Centralized error types via [`thiserror`].
 //! - **Multicast ingestion** ([`Provider`]) — UDP multicast socket management and zero-copy async receive loop.
 //! - **Message sinks** ([`MessageSink`]) — Trait abstraction with Kafka, benchmark, and iperf implementations.
+//! - **Kafka resilience** ([`ManagedProducer`], [`RecoveryPolicy`]) — Self-healing Kafka producer: a supervisor
+//!   replaces the `librdkafka` client when it raises a fatal error.
+//!
+//! ## Kafka resilience
+//!
+//! The production sink is a [`ManagedProducer`], not a bare `rdkafka` producer. Its
+//! [`supervise`](ManagedProducer::supervise) task watches the underlying client and, when it
+//! raises a fatal error, rebuilds it through [`producer_factory`] following a [`RecoveryPolicy`],
+//! while the listeners keep using the same handle. If the producer cannot be rebuilt within
+//! `kafka.recovery_timeout`, the supervisor returns [`NbdError::Recovery`] and the daemon exits.
+//!
+//! Rebuilding a producer re-reads the `[kafka]` section of the configuration file and re-resolves
+//! its secrets, so the configuration file and the files it references must stay readable and
+//! protected for the whole life of the daemon. [`ManagedProducer`] documents the behavior in
+//! detail, including the security considerations, and [`wait_for_retired_producers`] is used at
+//! shutdown to wait for replaced producers to be destroyed.
 //!
 //! ## Usage
 //!
