@@ -579,7 +579,7 @@ impl ManagedProducer {
                             break producer;
                         }
                         Ok(Err(e)) => e,
-                        Err(e) => return Err(NbdError::TaskPanic(e)),
+                        Err(e) => return Err(NbdError::from(e)),
                     };
 
                     let since = current_incident.get_or_insert_with(Instant::now);

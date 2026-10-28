@@ -285,7 +285,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
                     } else {
                         warn!("A listener was cancelled : {}", e);
                     }
-                    process_error = Some(NbdError::TaskPanic(e));
+                    process_error = Some(NbdError::from(e));
                     cancel_token.cancel();
                 }
             }
@@ -308,7 +308,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
                         error!("The producer was cancelled : {}", e);
                         error!("NBD will now try to stop gracefully.");
                     }
-                    process_error = Some(NbdError::TaskPanic(e));
+                    process_error = Some(NbdError::from(e));
                     cancel_token.cancel();
                 }
             }
@@ -336,7 +336,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
                     } else {
                         warn!("A listener was cancelled : {}", e);
                     }
-                    process_error = Some(NbdError::TaskPanic(e));
+                    process_error = Some(NbdError::from(e));
                     cancel_token.cancel();
                 }
             }
@@ -359,7 +359,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
                         error!("The producer was cancelled : {}", e);
                         error!("NBD will now try to stop gracefully.");
                     }
-                    process_error = Some(NbdError::TaskPanic(e));
+                    process_error = Some(NbdError::from(e));
                     cancel_token.cancel();
                 }
             }
@@ -389,7 +389,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
             }
             Ok(Err(e)) => {
                 warn!("The supervisor task failed : {}", e);
-                Err(NbdError::TaskPanic(e))
+                Err(NbdError::from(e))
             }
             Err(e) => {
                 error!("Failed to terminate the supervisor task gracefully : {e}");

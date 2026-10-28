@@ -74,7 +74,7 @@ pub use config::{
     RawCredentials, SecretSource, SecurityMechanism, check_secrets,
 };
 
-pub use errors::NbdError;
+pub use errors::{NbdError, UnwindShield};
 pub use kafka::{
     ManagedProducer, RecoveryPolicy, build_producer, producer_factory, wait_for_retired_producers,
 };
