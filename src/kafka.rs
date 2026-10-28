@@ -62,6 +62,7 @@ use tokio_util::sync::CancellationToken;
 use arc_swap::ArcSwap;
 
 use secrecy::ExposeSecret;
+use secrecy::zeroize::Zeroize;
 
 use tracing::{debug, error, info, warn};
 
@@ -198,7 +199,9 @@ pub fn build_producer(config: &ProducerConfig) -> Result<FutureProducer, NbdErro
             kafka_config.set("ssl.key.location", key_file.display().to_string());
         }
         if let Some(key_password) = &tls_config.key_password {
-            kafka_config.set("ssl.key.password", key_password.resolve()?.expose_secret());
+            let mut secret = key_password.resolve()?;
+            kafka_config.set("ssl.key.password", secret.expose_secret());
+            secret.zeroize();
         }
     };
 
@@ -227,10 +230,9 @@ pub fn build_producer(config: &ProducerConfig) -> Result<FutureProducer, NbdErro
                 kafka_config.set("sasl.mechanism", "OAUTHBEARER");
                 kafka_config.set("sasl.oauthbearer.method", "oidc");
                 kafka_config.set("sasl.oauthbearer.client.id", &oauth.client_id);
-                kafka_config.set(
-                    "sasl.oauthbearer.client.secret",
-                    oauth.client_secret.resolve()?.expose_secret(),
-                );
+                let mut secret = oauth.client_secret.resolve()?;
+                kafka_config.set("sasl.oauthbearer.client.secret", secret.expose_secret());
+                secret.zeroize();
                 kafka_config.set(
                     "sasl.oauthbearer.token.endpoint.url",
                     &oauth.token_endpoint_url,
@@ -728,8 +730,11 @@ pub type ProducerFactory = Arc<dyn Fn() -> Result<FutureProducer, NbdError> + Se
 pub fn producer_factory(config_path: PathBuf) -> ProducerFactory {
     Arc::new(move || {
         let raw_config = match std::fs::read_to_string(&config_path) {
-            Ok(content) => match toml::from_str::<RawConfig>(&content) {
-                Ok(config) => config,
+            Ok(mut content) => match toml::from_str::<RawConfig>(&content) {
+                Ok(config) => {
+                    content.zeroize();
+                    config
+                }
                 Err(e) => {
                     let span = e.span();
 
@@ -743,6 +748,8 @@ pub fn producer_factory(config_path: PathBuf) -> ProducerFactory {
                                 None => 0,
                             };
 
+                            content.zeroize();
+
                             return Err(NbdError::Config(format!(
                                 "The configuration file under {} is no longer valid (line {}, column {}). Run `nbd --check-config-file {}` to see the details.",
                                 config_path.display(),
@@ -752,6 +759,7 @@ pub fn producer_factory(config_path: PathBuf) -> ProducerFactory {
                             )));
                         }
                         _ => {
+                            content.zeroize();
                             return Err(NbdError::Config(format!(
                                 "The configuration file under {} is no longer valid. Run `nbd --check-config-file {}` to see the details.",
                                 config_path.display(),
@@ -772,12 +780,16 @@ pub fn producer_factory(config_path: PathBuf) -> ProducerFactory {
 
         check_secrets(&raw_config.kafka, &config_path)?;
 
-        let config = tracing::subscriber::with_default(
+        let mut config = tracing::subscriber::with_default(
             tracing::subscriber::NoSubscriber::default(),
             || ProducerConfig::try_from(raw_config.kafka),
         )?;
 
-        build_producer(&config)
+        let producer = build_producer(&config);
+
+        config.erase_secrets();
+
+        producer
     })
 }
 

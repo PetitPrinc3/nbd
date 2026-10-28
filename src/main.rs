@@ -112,7 +112,9 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
     if let Some(config_path) = args.check_config_file {
         let raw_config = RawConfig::from_path(&config_path)?;
         check_secrets(&raw_config.kafka, &config_path)?;
-        Config::try_from(raw_config)?;
+
+        let mut config = Config::try_from(raw_config)?;
+        config.kafka.erase_secrets();
 
         info!("The provided configuration file is valid and can be used as-is.");
         return Ok(());
@@ -133,7 +135,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
 
     let raw_config = RawConfig::from_path(&config_path)?;
     check_secrets(&raw_config.kafka, &config_path)?;
-    let config = Config::try_from(raw_config)?;
+    let mut config = Config::try_from(raw_config)?;
 
     #[cfg(feature = "metrics-exporter")]
     match PrometheusBuilder::new()
@@ -184,7 +186,11 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
         config.kafka.broker
     );
 
-    let kafka_producer = match build_producer(&config.kafka) {
+    let producer_candidate = build_producer(&config.kafka);
+
+    config.kafka.erase_secrets();
+
+    let kafka_producer = match producer_candidate {
         Ok(producer) => {
             match producer
                 .client()

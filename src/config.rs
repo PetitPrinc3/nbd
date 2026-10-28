@@ -45,6 +45,7 @@
 
 use serde::Deserialize;
 
+use secrecy::zeroize::Zeroize;
 use secrecy::{ExposeSecret, SecretString};
 
 use std::cmp;
@@ -76,9 +77,10 @@ pub struct RawConfig {
 impl RawConfig {
     pub fn from_path(path: &PathBuf) -> Result<RawConfig, NbdError> {
         match std::fs::read_to_string(path) {
-            Ok(content) => {
-                let raw_config: RawConfig = toml::from_str(&content)?;
-                Ok(raw_config)
+            Ok(mut content) => {
+                let raw_config = toml::from_str(&content);
+                content.zeroize();
+                Ok(raw_config?)
             }
             Err(e) => Err(NbdError::Config(format!(
                 "An error occured while parsing the configuration file : {}",
@@ -480,6 +482,31 @@ pub struct ProducerConfig {
     pub auth: Option<AuthConfig>,
 }
 
+impl ProducerConfig {
+    pub fn erase_secrets(&mut self) {
+        if let Some(ref mut tls_config) = self.tls
+            && let Some(key_password) = tls_config.key_password.as_mut()
+        {
+            key_password.erase();
+        }
+
+        (if let Some(ref mut auth) = self.auth {
+            match auth {
+                AuthConfig::Credentials(creds) => {
+                    creds.username.zeroize();
+                    creds.password.zeroize();
+                }
+                #[cfg(feature = "kafka-auth-gssapi")]
+                AuthConfig::Kerberos(_) => {}
+                #[cfg(feature = "kafka-auth-oauth")]
+                AuthConfig::OAuth(creds) => {
+                    creds.client_secret.erase();
+                }
+            }
+        });
+    }
+}
+
 impl TryFrom<RawProducerConfig> for ProducerConfig {
     type Error = NbdError;
     fn try_from(raw_producer_config: RawProducerConfig) -> Result<Self, Self::Error> {
@@ -765,15 +792,16 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
                     )));
                 }
 
-                if let Some(ref key_password) = tls_config.key_password
-                    && let Ok(ref key_secret) = key_password.resolve()
+                if let Some(key_password) = tls_config.key_password.as_mut()
+                    && let Ok(key_secret) = key_password.resolve()
                 {
                     if key_secret.expose_secret().is_empty() {
                         return Err(NbdError::Config(String::from(
                             "The `kafka.tls.key_password` parameters cannot be empty.",
                         )));
                     } else {
-                        tls_config.key_password = Some(SecretSource::Literal(key_secret.clone()));
+                        key_password.erase();
+                        tls_config.key_password = Some(SecretSource::Literal(key_secret));
                     }
                 }
 
@@ -795,14 +823,19 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
             Some(RawAuthConfig::RawCredentials(value)) => {
                 debug!("The `kafka.auth` section is configured.");
 
-                let resolved_user = match value.username.resolve() {
+                let mut resolved_user = match value.username.resolve() {
                     Ok(username) => username,
                     Err(e) => {
                         error!("{}", e);
                         return Err(e);
                     }
                 };
-                let resolved_pass = match value.password.resolve() {
+
+                if let SecretSource::Literal(mut username) = value.username {
+                    username.zeroize();
+                }
+
+                let mut resolved_pass = match value.password.resolve() {
                     Ok(password) => password,
                     Err(e) => {
                         error!("{}", e);
@@ -810,9 +843,16 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
                     }
                 };
 
+                if let SecretSource::Literal(mut password) = value.password {
+                    password.zeroize();
+                }
+
                 if resolved_user.expose_secret().is_empty()
                     || resolved_pass.expose_secret().is_empty()
                 {
+                    resolved_user.zeroize();
+                    resolved_pass.zeroize();
+
                     return Err(NbdError::Config(String::from(
                         "The `kafka.auth.username` and `kafka.auth.password` parameters cannot be empty.",
                     )));
@@ -875,6 +915,7 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
                             "The `kafka.auth.oauth.client_id` and `kafka.auth.oauth.client_secret` parameters cannot be empty.",
                         )));
                     } else {
+                        value.oauth.client_secret.erase();
                         value.oauth.client_secret = SecretSource::Literal(client_secret);
                     }
                 }
@@ -1294,10 +1335,15 @@ impl SecretSource {
                         var, e
                     ))
                 })?;
-                Ok(SecretString::from(val))
+                let secret = SecretString::from(val);
+                Ok(secret)
             }
             SecretSource::File { file: path } => match std::fs::read_to_string(path) {
-                Ok(value) => Ok(SecretString::from(value.trim())),
+                Ok(mut value) => {
+                    let secret = SecretString::from(value.trim());
+                    value.zeroize();
+                    Ok(secret)
+                }
                 Err(e) => Err(NbdError::Config(format!(
                     "Unable to read secret from file {} : {}",
                     path.display(),
@@ -1316,5 +1362,13 @@ impl SecretSource {
             return Some(path);
         }
         None
+    }
+
+    pub fn erase(&mut self) {
+        match self {
+            SecretSource::Literal(e) => e.zeroize(),
+            SecretSource::Env { env: _ } => {}
+            SecretSource::File { file: _ } => {}
+        }
     }
 }
