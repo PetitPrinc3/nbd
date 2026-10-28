@@ -53,7 +53,7 @@ use clap::Parser;
 
 use nbd::{
     Config, ManagedProducer, NbdError, Provider, RawConfig, RecoveryPolicy, build_producer,
-    check_secrets, producer_factory, wait_for_retired_producers,
+    check_secrets, producer_factory,
 };
 
 mod args;
@@ -408,9 +408,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
         Ok(())
     };
 
-    drop(producer_manager);
-
-    let producer_termination = match wait_for_retired_producers(Duration::from_secs(5)) {
+    let producer_termination = match producer_manager.close(Duration::from_secs(5)).await {
         Ok(()) => {
             info!("All producers were stopped gracefully.");
             Ok(())

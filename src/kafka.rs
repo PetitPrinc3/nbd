@@ -75,6 +75,8 @@ use crate::{AuthConfig, MessageSink, NbdError, ProducerConfig, RawConfig, check_
 /// intentionally never joined.
 static REAPER: OnceLock<Sender<ReaperTargets>> = OnceLock::new();
 
+const RETIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Messages understood by the reaper thread. They are handled in order.
 enum ReaperTargets {
     /// A retired producer to destroy.
@@ -138,23 +140,31 @@ fn reaper() -> &'static Sender<ReaperTargets> {
 /// Returns [`NbdError::Termination`] if the retired producers were not all destroyed within
 /// `timeout`.
 pub fn wait_for_retired_producers(timeout: Duration) -> Result<(), NbdError> {
+    match wait_for_reaper(timeout) {
+        Ok(true) => {
+            info!("Successfully terminated all Kafka producers.");
+            Ok(())
+        }
+        Ok(false) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn wait_for_reaper(timeout: Duration) -> Result<bool, NbdError> {
     match REAPER.get() {
         Some(reaper_tx) => {
             let (tx, rx) = channel::<()>();
             let _ = reaper_tx.send(ReaperTargets::Completion(tx));
 
             match rx.recv_timeout(timeout) {
-                Ok(_) => {
-                    info!("Successfully terminated all Kafka producers.");
-                    Ok(())
-                }
+                Ok(_) => Ok(true),
                 Err(RecvTimeoutError::Timeout) => Err(NbdError::Termination(String::from(
                     "Timed out while waiting for proper producer cancellation to occur.",
                 ))),
-                Err(RecvTimeoutError::Disconnected) => Ok(()),
+                Err(RecvTimeoutError::Disconnected) => Ok(false),
             }
         }
-        None => Ok(()),
+        None => Ok(false),
     }
 }
 
@@ -299,6 +309,12 @@ impl ProducerCell {
             None => None,
         }
     }
+
+    fn retire_now(&mut self) {
+        if let Some(producer) = self.producer.take() {
+            retire(producer);
+        }
+    }
 }
 
 /// Hands the `librdkafka` client over to the reaper thread instead of destroying it in place.
@@ -315,9 +331,7 @@ impl ProducerCell {
 /// shutdown sequence waits for that explicitly, see [`wait_for_retired_producers`].
 impl Drop for ProducerCell {
     fn drop(&mut self) {
-        if let Some(producer) = self.producer.take() {
-            retire(producer);
-        }
+        self.retire_now();
     }
 }
 
@@ -625,14 +639,14 @@ impl ManagedProducer {
                     }
                 };
 
+                let generation = cell.generation;
+
                 // Swap broken producer with new one
                 self.container.cell.swap(Arc::new(ProducerCell {
                     producer: Some(new_producer),
                     generation: cell.generation.saturating_add(1),
                     faulted: AtomicBool::new(false),
                 }));
-
-                drop(cell);
 
                 // Reset error count
                 let errors = self.container.errors.swap(0, Ordering::Relaxed);
@@ -652,8 +666,30 @@ impl ManagedProducer {
 
                 // Store generation instant
                 last_generation = Some(Instant::now());
+
+                if let Err(e) = retire_cell(cell, RETIRE_TIMEOUT, token.clone()).await {
+                    warn!(
+                        "Failed to confirm producer retirement (generation {}) : {}",
+                        generation, e
+                    );
+                };
             }
         }
+    }
+
+    pub async fn close(&self, timeout: Duration) -> Result<(), NbdError> {
+        let generation = self.generation();
+
+        retire_cell(
+            self.container.cell.swap(Arc::new(ProducerCell {
+                producer: None,
+                generation: generation.saturating_add(1),
+                faulted: AtomicBool::new(false),
+            })),
+            timeout,
+            CancellationToken::new(),
+        )
+        .await
     }
 }
 
@@ -843,5 +879,46 @@ impl RecoveryPolicy {
             let exp = 1u32 << (level.saturating_sub(1)).min(16);
             self.backoff_base.saturating_mul(exp).min(self.backoff_max)
         }
+    }
+}
+
+async fn retire_cell(
+    mut cell: Arc<ProducerCell>,
+    timeout: Duration,
+    token: CancellationToken,
+) -> Result<(), NbdError> {
+    let generation = cell.generation;
+
+    tokio::select! {
+        _ = sleep(timeout) => {
+            warn!("Timed out while waiting on producer (still in use) (generation {}). The producer will be dropped once released by the last listener.", generation);
+            return Ok(());
+        },
+        _ = token.cancelled() => {
+            warn!("Failed to retire the producer (generation {}) (cancelled).", generation);
+            return Ok(());
+        }
+        mut c = async move {
+            loop {
+                match Arc::try_unwrap(cell) {
+                    Ok(value) => {break value},
+                    Err(value) => {
+                        cell = value;
+                        sleep(Duration::from_millis(5)).await;
+                    }
+                }
+            }
+        } => {
+            c.retire_now();
+        }
+    };
+
+    match spawn_blocking(move || wait_for_reaper(timeout)).await {
+        Ok(Ok(_)) => {
+            debug!("Producer destroyed (generation {}).", generation);
+            Ok(())
+        }
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(NbdError::from(e)),
     }
 }
