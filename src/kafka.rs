@@ -602,18 +602,24 @@ impl ManagedProducer {
                         "An error occurred while recreating a connection with the Kafka broker (attempt {}) : {}",
                         generation_errors, e
                     );
+
+                    let level_delay =
+                        policy.get_delay(stability_indicator.saturating_add(generation_errors));
+
                     warn!(
                         "Next attempt at recreating a connection with the broker in {:?}",
-                        policy.get_delay(stability_indicator.saturating_add(generation_errors))
+                        level_delay
                     );
+
+                    let capped_delay = since.checked_add(policy.give_up_after);
 
                     tokio::select! {
                         _= token.cancelled() => {
                             warn!("Failed to recreate a connection with the Kafka broker (cancelled).");
                             return Ok(());
                         },
-                        _ = sleep(policy.get_delay(stability_indicator.saturating_add(generation_errors))) => {}
-                        _ = sleep_until((*since + policy.give_up_after).into()) => {}
+                        _ = sleep(level_delay) => {},
+                        _ = sleep_until(capped_delay.unwrap_or_else(Instant::now).into()), if capped_delay.is_some() => {},
                     }
                 };
 
@@ -733,7 +739,7 @@ pub fn producer_factory(config_path: PathBuf) -> ProducerFactory {
 
                             let line = span.clone().count();
                             let col = match span.last() {
-                                Some(line) => line.chars().count() + 1,
+                                Some(line) => line.chars().count().saturating_add(1),
                                 None => 0,
                             };
 
@@ -822,7 +828,7 @@ impl RecoveryPolicy {
         if level == 0 {
             Duration::ZERO
         } else {
-            let exp = 1u32 << (level - 1).min(16);
+            let exp = 1u32 << (level.saturating_sub(1)).min(16);
             self.backoff_base.saturating_mul(exp).min(self.backoff_max)
         }
     }

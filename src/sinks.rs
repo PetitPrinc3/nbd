@@ -266,17 +266,46 @@ impl MessageSink for BenchSink {
             )));
         }
 
-        let ts_tx_ns = u64::from_be_bytes(payload[..8].try_into().unwrap());
-        let ts_tx = self.epoch + Duration::from_nanos(ts_tx_ns);
+        let ts_tx_ns = match payload.get(..8) {
+            Some(payload) => match <[u8; 8]>::try_from(payload) {
+                Ok(vec) => u64::from_be_bytes(vec),
+                Err(_) => {
+                    return Err(NbdError::InvalidPacket(String::from(
+                        "Failed to convert first 8 bytes of packet to u64",
+                    )));
+                }
+            },
+            None => {
+                return Err(NbdError::InvalidPacket(format!(
+                    "Failed to get first 8 bytes of packet with len : {}",
+                    payload.len()
+                )));
+            }
+        };
+
+        if let Some(ts) = self.epoch.checked_add(Duration::from_nanos(ts_tx_ns))
+            && let Ok(mut latencies) = self.latencies.lock()
+        {
+            match ts_rx.checked_duration_since(ts) {
+                Some(latency) => {
+                    latencies.push(latency);
+                }
+                None => {
+                    return Err(NbdError::InvalidPacket(String::from(
+                        "Invalid timestamp in packet.",
+                    )));
+                }
+            }
+        } else {
+            return Err(NbdError::InvalidPacket(String::from(
+                "Failed to determine latency for one packet.",
+            )));
+        }
 
         self.received_messages
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.received_bytes
             .fetch_add(payload.len(), std::sync::atomic::Ordering::Relaxed);
-        self.latencies
-            .lock()
-            .unwrap()
-            .push(ts_rx.duration_since(ts_tx));
 
         Ok(std::future::ready(Ok(())))
     }
@@ -330,20 +359,79 @@ impl MessageSink for IPerfSink {
             )));
         }
 
-        let pkt_idx = u32::from_be_bytes(payload[..4].try_into().unwrap());
+        let pkt_idx = match payload.get(..4) {
+            Some(payload) => match <[u8; 4]>::try_from(payload) {
+                Ok(vec) => u32::from_be_bytes(vec),
+                Err(_) => {
+                    return Err(NbdError::InvalidPacket(String::from(
+                        "Failed to convert first 4 bytes of packet to u32",
+                    )));
+                }
+            },
+            None => {
+                return Err(NbdError::InvalidPacket(format!(
+                    "Failed to get first 4 bytes of packet with len : {}",
+                    payload.len()
+                )));
+            }
+        };
 
-        let ts_tx = u32::from_be_bytes(payload[4..8].try_into().unwrap()) as u64;
-        let ts_tx_micros = (ts_tx * 1_000_000
-            + (u32::from_be_bytes(payload[8..12].try_into().unwrap()) as u64))
-            as u128;
+        let ts_tx = match payload.get(4..8) {
+            Some(payload) => u64::from(match <[u8; 4]>::try_from(payload) {
+                Ok(vec) => u32::from_be_bytes(vec),
+                Err(_) => {
+                    return Err(NbdError::InvalidPacket(String::from(
+                        "Failed to convert bytes 4 to 8 of packet to u32",
+                    )));
+                }
+            }),
+            None => {
+                return Err(NbdError::InvalidPacket(format!(
+                    "Failed to get bytes 4 to 8 of packet with len : {}",
+                    payload.len()
+                )));
+            }
+        };
 
-        let ts_rx_micros = ts_rx.duration_since(UNIX_EPOCH).unwrap().as_micros();
+        let ts_tx_micros = u128::from(ts_tx.saturating_mul(1_000_000).saturating_add(
+            match payload.get(8..12) {
+                Some(payload) => u64::from(match <[u8; 4]>::try_from(payload) {
+                    Ok(vec) => u32::from_be_bytes(vec),
+                    Err(_) => {
+                        return Err(NbdError::InvalidPacket(String::from(
+                            "Failed to convert bytes 8 to 12 of packet to u32",
+                        )));
+                    }
+                }),
+                None => {
+                    return Err(NbdError::InvalidPacket(format!(
+                        "Failed to get bytes 8 to 12 of packet with len : {}",
+                        payload.len()
+                    )));
+                }
+            },
+        ));
 
-        if let Ok(mut state) = self.state.lock() {
-            state
-                .latencies
-                .push(Duration::from_micros((ts_rx_micros - ts_tx_micros) as u64));
+        if let Ok(ts_rx_micros) = ts_rx.duration_since(UNIX_EPOCH)
+            && let Ok(mut state) = self.state.lock()
+        {
+            if let Ok(latency) =
+                u64::try_from(match ts_rx_micros.as_micros().checked_sub(ts_tx_micros) {
+                    Some(duration) => duration,
+                    None => {
+                        return Err(NbdError::InvalidPacket(String::from(
+                            "Failed to compute latency based on packet data.",
+                        )));
+                    }
+                })
+            {
+                state.latencies.push(Duration::from_micros(latency));
+            }
             state.indexes.push(pkt_idx);
+        } else {
+            return Err(NbdError::InvalidPacket(String::from(
+                "Failed to determine latency for one packet.",
+            )));
         }
 
         self.received_messages

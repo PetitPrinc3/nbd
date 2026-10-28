@@ -316,7 +316,7 @@ impl ProviderConfig {
         match raw_provider_config.port {
             Some(port) => {
                 if port == 0 {
-                    let default_port: u16 = match u16::try_from(20000 + &idx) {
+                    let default_port: u16 = match u16::try_from(20000_usize.saturating_add(idx)) {
                         Ok(p) => p,
                         Err(_) => {
                             error!(
@@ -356,7 +356,7 @@ impl ProviderConfig {
                 }
             }
             None => {
-                let default_port: u16 = match u16::try_from(20000 + &idx) {
+                let default_port: u16 = match u16::try_from(20000_usize.saturating_add(idx)) {
                     Ok(p) => p,
                     Err(_) => {
                         error!(
@@ -381,22 +381,16 @@ impl ProviderConfig {
         let default_message_size = cmp::min(1500, socket_buffer_size);
 
         match raw_provider_config.message_size {
-            Some(value) => {
+            Some(mut value) => {
+                let mut is_correct = true;
+
                 if value == 0 {
                     warn!(
                         "The `providers.{}.message_size` parameter is unspecified and was replaced by a default value of `{}`.",
                         &idx, default_message_size,
                     );
                     provider_config.message_size = default_message_size;
-                } else if value > socket_buffer_size {
-                    warn!(
-                        "The `providers.{}.message_size` parameter is bigger than the `nbd.socket_buffer_size` parameter ({} > {}).",
-                        &idx, value, socket_buffer_size,
-                    );
-                    warn!(
-                        "This is most likely a missconfiguration and will cause data loss when receiving packets longer than the `nbd.socket_buffer_size`."
-                    );
-                    provider_config.message_size = value;
+                    is_correct = false;
                 } else if value > 65_507 {
                     warn!(
                         "The `providers.{}.message_size` parameter is bigger than the maximum UDP datagram size ({} > {}) and was replaced by {}. (see https://en.wikipedia.org/wiki/User_Datagram_Protocol#UDP_datagram_structure)",
@@ -405,8 +399,24 @@ impl ProviderConfig {
                     warn!(
                         "This is most likely a missconfiguration and may cause issues if the total allocated space is bigger than the available memory. A default value of 1 500 is recommended."
                     );
-                    provider_config.message_size = default_message_size;
-                } else {
+                    provider_config.message_size = 65_507;
+                    value = 65_507;
+                    is_correct = false;
+                }
+
+                if value > socket_buffer_size {
+                    warn!(
+                        "The `providers.{}.message_size` parameter is bigger than the `nbd.socket_buffer_size` parameter ({} > {}).",
+                        &idx, value, socket_buffer_size,
+                    );
+                    warn!(
+                        "This is most likely a missconfiguration and will cause data loss when receiving packets longer than the `nbd.socket_buffer_size`."
+                    );
+                    provider_config.message_size = value;
+                    is_correct = false;
+                }
+
+                if is_correct {
                     debug!(
                         "The `providers.{}.message_size` parameter is configured correctly.",
                         &idx,

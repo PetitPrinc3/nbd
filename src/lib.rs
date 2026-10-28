@@ -1,5 +1,16 @@
 #![forbid(unsafe_code)]
-#![deny(clippy::mem_forget)]
+#![deny(
+    clippy::mem_forget,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
 //! # Nothing But Data
 //!
 //! A lightweight, high-performance and secure data pipeline for ingesting real-time

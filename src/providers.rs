@@ -198,7 +198,8 @@ impl Provider {
 
         let listener = UdpSocket::from_std(udp_socket)?;
 
-        let mut buf = BytesMut::with_capacity(self.buff_size * BUFFER_RESERVATION_HEADROOM);
+        let mut buf =
+            BytesMut::with_capacity(self.buff_size.saturating_mul(BUFFER_RESERVATION_HEADROOM));
 
         let mut in_flight = FuturesUnordered::new();
 
@@ -241,7 +242,7 @@ impl Provider {
                                 }
 
                                 if buf.capacity() < self.buff_size {
-                                    buf.reserve(self.buff_size * BUFFER_RESERVATION_HEADROOM);
+                                    buf.reserve(self.buff_size.saturating_mul(BUFFER_RESERVATION_HEADROOM));
                                 };
 
                             }
