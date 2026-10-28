@@ -556,7 +556,7 @@ impl ManagedProducer {
                     stability_indicator = 0;
                 } else {
                     stability_indicator = stability_indicator.saturating_add(1);
-                    let delay = policy.get_delay(stability_indicator);
+                    let delay = policy.backoff_delay(stability_indicator);
 
                     warn!("Next attempt at recreating the connection in {:?}.", delay);
 
@@ -604,7 +604,7 @@ impl ManagedProducer {
                     );
 
                     let level_delay =
-                        policy.get_delay(stability_indicator.saturating_add(generation_errors));
+                        policy.backoff_delay(stability_indicator.saturating_add(generation_errors));
 
                     warn!(
                         "Next attempt at recreating a connection with the broker in {:?}",
@@ -824,7 +824,7 @@ impl RecoveryPolicy {
     /// Back-off delay for a given level, see the [type documentation](RecoveryPolicy).
     ///
     /// The exponent is capped, and the multiplication saturates, so no level can overflow.
-    fn get_delay(&self, level: u32) -> Duration {
+    fn backoff_delay(&self, level: u32) -> Duration {
         if level == 0 {
             Duration::ZERO
         } else {

@@ -69,7 +69,7 @@ async fn spike_test() {
     let listener_token = token.clone();
     let test_sink = BenchSink::default();
 
-    let port = match provider.get_socket() {
+    let port = match provider.socket() {
         Ok(socket) => match socket.local_addr() {
             Ok(sockaddr) => match sockaddr.as_socket() {
                 Some(socketaddr) => socketaddr.port(),

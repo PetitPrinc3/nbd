@@ -105,7 +105,7 @@ impl Provider {
     }
 
     /// Get the listening socket
-    pub fn get_socket(&self) -> Result<&Socket, NbdError> {
+    pub fn socket(&self) -> Result<&Socket, NbdError> {
         self.socket
             .as_ref()
             .ok_or_else(|| NbdError::Socket(String::from("The socket doesn't exist yet.")))
@@ -115,7 +115,7 @@ impl Provider {
     pub fn subscribe(&mut self, max_buffer_size: &usize) -> Result<(), NbdError> {
         self.create_socket(max_buffer_size)?;
 
-        match self.get_socket() {
+        match self.socket() {
             Ok(socket) => {
                 socket.set_reuse_address(true)?;
                 #[cfg(unix)]
@@ -138,29 +138,29 @@ impl Provider {
         match self.group {
             IpAddr::V4(ref maddr_v4) => match self.interface {
                 Interface::V4(ref interface) => {
-                    self.get_socket()?.join_multicast_v4(maddr_v4, interface)?;
+                    self.socket()?.join_multicast_v4(maddr_v4, interface)?;
                 }
                 Interface::V6(ref interface) => {
                     warn!(
                         "An unexpected error occured because the requested interface ({}) is Ipv6 while the requested group is Ipv4 ({}). Defaulting to the default Ipv4 interface (0.0.0.0)",
                         interface, maddr_v4
                     );
-                    self.get_socket()?
+                    self.socket()?
                         .join_multicast_v4(maddr_v4, &Ipv4Addr::UNSPECIFIED)?;
                 }
             },
             IpAddr::V6(ref maddr_v6) => match self.interface {
                 Interface::V6(interface) => {
-                    self.get_socket()?.join_multicast_v6(maddr_v6, interface)?;
-                    self.get_socket()?.set_only_v6(true)?;
+                    self.socket()?.join_multicast_v6(maddr_v6, interface)?;
+                    self.socket()?.set_only_v6(true)?;
                 }
                 Interface::V4(ref interface) => {
                     warn!(
                         "An unexpected error occured because the requested interface ({}) is Ipv4 while the requested group is Ipv6 ({}). Defaulting to the default Ipv6 interface (0)",
                         interface, maddr_v6
                     );
-                    self.get_socket()?.join_multicast_v6(maddr_v6, 0)?;
-                    self.get_socket()?.set_only_v6(true)?;
+                    self.socket()?.join_multicast_v6(maddr_v6, 0)?;
+                    self.socket()?.set_only_v6(true)?;
                 }
             },
         };

@@ -56,7 +56,7 @@ async fn minor_latency_test() {
     let mut provider = Provider::from(&config_test);
     provider.subscribe(&(64 * 1024)).unwrap();
 
-    let port = match provider.get_socket() {
+    let port = match provider.socket() {
         Ok(socket) => match socket.local_addr() {
             Ok(sockaddr) => match sockaddr.as_socket() {
                 Some(socketaddr) => socketaddr.port(),
