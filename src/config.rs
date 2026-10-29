@@ -505,6 +505,17 @@ impl ProducerConfig {
             }
         });
     }
+
+    pub fn posture(&self) -> SecurityPosture {
+        SecurityPosture {
+            target: self.broker.clone(),
+            tls: self.tls.as_ref().map(SafeTlsConfig::from),
+            sasl: match self.auth {
+                Some(ref a) => Some(a.as_str()),
+                None => None,
+            },
+        }
+    }
 }
 
 impl TryFrom<RawProducerConfig> for ProducerConfig {
@@ -1129,6 +1140,18 @@ pub enum AuthConfig {
     OAuth(OAuth),
 }
 
+impl AuthConfig {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AuthConfig::Credentials(c) => c.mechanism.as_str(),
+            #[cfg(feature = "kafka-auth-gssapi")]
+            AuthConfig::Kerberos(_) => "GSSAPI",
+            #[cfg(feature = "kafka-auth-oauth")]
+            AuthConfig::OAuth(_) => "OAUTHBEARER",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
@@ -1136,6 +1159,23 @@ pub struct TlsConfig {
     pub cert_file: Option<PathBuf>,
     pub key_file: Option<PathBuf>,
     pub key_password: Option<SecretSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafeTlsConfig {
+    pub ca_file: PathBuf,
+    pub cert_file: Option<PathBuf>,
+    pub key_file: Option<PathBuf>,
+}
+
+impl From<&TlsConfig> for SafeTlsConfig {
+    fn from(tls_config: &TlsConfig) -> Self {
+        SafeTlsConfig {
+            ca_file: tls_config.ca_file.clone(),
+            cert_file: tls_config.cert_file.clone(),
+            key_file: tls_config.key_file.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1153,7 +1193,7 @@ pub struct Credentials {
     pub mechanism: SecurityMechanism,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 pub enum SecurityMechanism {
     #[serde(rename = "PLAIN")]
     Plain,
@@ -1316,7 +1356,7 @@ pub fn check_secrets(
 /// Resolved values are wrapped in [`secrecy::SecretString`], which prevents
 /// accidental `Debug`/`Display` formatting of secret material at compile time.
 /// Use [`SecretSource::resolve`] to obtain the underlying [`secrecy::SecretString`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum SecretSource {
     Env { env: String },
@@ -1369,6 +1409,108 @@ impl SecretSource {
             SecretSource::Literal(e) => e.zeroize(),
             SecretSource::Env { env: _ } => {}
             SecretSource::File { file: _ } => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecurityPosture {
+    target: String,
+    tls: Option<SafeTlsConfig>,
+    sasl: Option<&'static str>,
+}
+
+impl SecurityPosture {
+    pub fn check_against(&self, candidate: &Self) -> Result<(), NbdError> {
+        let mut errors: Vec<String> = Vec::new();
+
+        if self.tls != candidate.tls {
+            if candidate.tls.is_none() {
+                error!("The `kafka.tls` section is missing in the new configuration.");
+                errors.push(String::from("missing `kafka.tls` section"))
+            } else {
+                warn!("The `kafka.tls` configuration was changed in the new configuration.");
+            }
+        }
+
+        if let Some(ref config) = self.tls
+            && let Some(ref candidate_config) = candidate.tls
+        {
+            if config.cert_file.is_some() && candidate_config.cert_file.is_none() {
+                // Note : this doesn't prevent the file itself (its content) from being changed.
+                error!(
+                    "The certificate file for the TLS configuration was removed in the new configuration."
+                );
+                errors.push(String::from("missing certificate file"));
+            }
+
+            if config.key_file.is_some() && candidate_config.key_file.is_none() {
+                // Note : this doesn't prevent the file itself (its content) from being changed.
+                error!(
+                    "The key file for the TLS configuration was removed in the new configuration."
+                );
+                errors.push(String::from("missing key file"));
+            }
+
+            if config.ca_file != candidate_config.ca_file {
+                // Note : this doesn't prevent the file itself (its content) from being changed.
+                error!(
+                    "The CA file for the TLS configuration was changed in the new configuration."
+                );
+                errors.push(String::from("changed ca file"));
+            }
+        }
+
+        if self.mechanism_rank() > candidate.mechanism_rank() {
+            if candidate.mechanism_rank() < 0 {
+                error!("The `kafka.auth` section is missing in the new configuration.");
+                errors.push(String::from("missing `kafka.auth` section"));
+            } else {
+                error!(
+                    "The `kafka.auth` section has a lower security mechanism ({} > {}).",
+                    self.sasl.unwrap_or("NONE"),
+                    candidate.sasl.unwrap_or("NONE")
+                );
+                errors.push(String::from("lower security mechanism"));
+            }
+        } else if self.mechanism_rank() < candidate.mechanism_rank() {
+            warn!(
+                "The `kafka.auth` section has a higher security mechanism ({} < {}).",
+                self.sasl.unwrap_or("NONE"),
+                candidate.sasl.unwrap_or("NONE")
+            )
+        }
+
+        if self.target != candidate.target {
+            warn!(
+                "The `kafka.broker` parameter was changed to {} in the new configuration.",
+                candidate.target
+            );
+        };
+
+        match errors.is_empty() {
+            true => Ok(()),
+            false => {
+                error!(
+                    "Changes in the configuration file were refused. They can be manually re-applied by restarting NBD."
+                );
+                Err(NbdError::Config(format!(
+                    "Configuration file refused for concerns : {}. These changes can be manually re-applied by restarting NBD.",
+                    errors.join(", "),
+                )))
+            }
+        }
+    }
+
+    fn mechanism_rank(&self) -> i16 {
+        match self.sasl {
+            Some("GSSAPI") => 3,
+            Some("OAUTHBEARER") => 3,
+            Some("SCRAM-SHA-512") => 2,
+            Some("SCRAM-SHA-256") => 1,
+            Some("PLAIN") => 0,
+            None => -1,
+            _ => i16::MAX,
         }
     }
 }

@@ -48,7 +48,7 @@ use bytes::Bytes;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use std::time::{Duration, Instant};
 
@@ -67,7 +67,9 @@ use secrecy::zeroize::Zeroize;
 use tracing::{debug, error, info, warn};
 
 use crate::sinks::submit_on;
-use crate::{AuthConfig, MessageSink, NbdError, ProducerConfig, RawConfig, check_secrets};
+use crate::{
+    AuthConfig, MessageSink, NbdError, ProducerConfig, RawConfig, SecurityPosture, check_secrets,
+};
 
 /// Channel feeding the `nbd-kafka-reaper` thread, which destroys retired producers.
 ///
@@ -763,7 +765,9 @@ pub type ProducerFactory = Arc<dyn Fn() -> Result<FutureProducer, NbdError> + Se
 /// read, is no longer valid TOML, violates the permission checks, or contains an invalid value, and
 /// with the errors of [`build_producer`] otherwise. The message for an invalid TOML file gives the
 /// line and column but does not repeat the offending text, which could contain a secret literal.
-pub fn producer_factory(config_path: PathBuf) -> ProducerFactory {
+pub fn producer_factory(config_path: PathBuf, posture: SecurityPosture) -> ProducerFactory {
+    let current_posture = Mutex::new(posture);
+
     Arc::new(move || {
         let raw_config = match std::fs::read_to_string(&config_path) {
             Ok(mut content) => match toml::from_str::<RawConfig>(&content) {
@@ -821,9 +825,20 @@ pub fn producer_factory(config_path: PathBuf) -> ProducerFactory {
             || ProducerConfig::try_from(raw_config.kafka),
         )?;
 
+        let mut current = current_posture.lock().unwrap_or_else(|e| e.into_inner());
+
+        if let Err(e) = current.check_against(&config.posture()) {
+            config.erase_secrets();
+            return Err(e);
+        }
+
         let producer = build_producer(&config);
 
         config.erase_secrets();
+
+        if producer.is_ok() {
+            *current = config.posture();
+        }
 
         producer
     })

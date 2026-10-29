@@ -71,7 +71,7 @@ mod sinks;
 
 pub use config::{
     AuthConfig, Config, Credentials, Interface, ProducerConfig, ProviderConfig, RawConfig,
-    RawCredentials, SecretSource, SecurityMechanism, check_secrets,
+    RawCredentials, SecretSource, SecurityMechanism, SecurityPosture, check_secrets,
 };
 
 pub use errors::{NbdError, UnwindShield};

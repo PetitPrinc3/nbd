@@ -220,7 +220,8 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
 
     let recovery_policy = RecoveryPolicy::new(Duration::from_millis(config.kafka.recovery_timeout));
     let producer_manager = ManagedProducer::new(kafka_producer);
-    let factory = producer_factory(config_path);
+
+    let factory = producer_factory(config_path, config.kafka.posture());
 
     let mut supervisor_manager = producer_manager.clone();
     let supervisor_token = cancel_token.clone();
