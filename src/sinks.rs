@@ -58,14 +58,24 @@ const LOG_THRESHOLD: u64 = 1;
 ///   delivery confirmation, or returns [`NbdError::Backpressure`] if the sink queue is full.
 /// - Awaiting the returned [`Transaction`](MessageSink::Transaction) future confirms delivery
 ///   or yields an error.
-///
-/// # Arguments
-///
-/// * `topic` — The Kafka topic (or logical channel) to deliver the message to.
-/// * `payload` — The raw message bytes, produced via zero-copy `BytesMut::split_to().freeze()`.
 pub trait MessageSink: Clone + Send + 'static {
+    /// Future that resolves when the delivery of a submitted message is confirmed, or has failed.
     type Transaction: std::future::Future<Output = Result<(), NbdError>> + Send + 'static;
 
+    /// Submits a message without blocking, and returns the future that confirms its delivery.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` — The Kafka topic (or logical channel) to deliver the message to.
+    /// * `payload` — The raw message bytes, produced via zero-copy `BytesMut::split_to().freeze()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NbdError::Backpressure`] when the sink cannot take the message because its queue
+    /// is full, and another [`NbdError`] when the message is rejected (the Kafka sinks return
+    /// [`NbdError::Kafka`], and [`ManagedProducer`](crate::ManagedProducer) returns
+    /// [`NbdError::Recovery`] while it has no producer). A rejected message is dropped: the caller
+    /// does not retry it.
     fn submit(&self, topic: Arc<str>, payload: Bytes) -> Result<Self::Transaction, NbdError>;
 }
 
@@ -234,11 +244,22 @@ pub(crate) fn submit_on(
 ///
 /// Uses lock-free atomic counters (`Relaxed` ordering) on the hot path for message/byte
 /// counting, and a `Mutex<Vec<Duration>>` for latency recording.
+///
+/// # Errors
+///
+/// [`submit`](MessageSink::submit) returns [`NbdError::InvalidPacket`], without panicking, when
+/// the payload is shorter than 8 bytes, when its timestamp cannot be turned into an instant, when
+/// that timestamp is later than the moment the packet is received, or when the latency list cannot
+/// be locked (poisoned mutex). A rejected packet is not counted.
 #[derive(Clone)]
 pub struct BenchSink {
+    /// Time origin of the timestamps carried by the payloads.
     pub epoch: Instant,
+    /// Number of messages accepted so far.
     pub received_messages: Arc<std::sync::atomic::AtomicU64>,
+    /// Number of payload bytes accepted so far.
     pub received_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    /// Latency of each accepted message, in order of arrival.
     pub latencies: Arc<Mutex<Vec<Duration>>>,
 }
 
@@ -319,17 +340,31 @@ impl MessageSink for BenchSink {
 /// - Bytes `[8..12]`: `u32` transmit timestamp microseconds (big-endian)
 ///
 /// Tracks sequence numbers for out-of-order and packet loss detection.
-/// Rejects packets shorter than 12 bytes with [`NbdError::InvalidPacket`].
+///
+/// # Errors
+///
+/// [`submit`](MessageSink::submit) rejects a packet with [`NbdError::InvalidPacket`], without
+/// panicking, when it is shorter than 12 bytes, when its transmit timestamp is later than the
+/// moment it is received (for instance because the clocks of the sender and of the host are not
+/// synchronized), or when the state cannot be locked (poisoned mutex). A rejected packet is not
+/// counted.
 #[derive(Clone)]
 pub struct IPerfSink {
+    /// Latencies and sequence numbers recorded so far.
     pub state: Arc<Mutex<IPerfSinkState>>,
+    /// Number of packets accepted so far.
     pub received_messages: Arc<std::sync::atomic::AtomicU64>,
+    /// Number of payload bytes accepted so far.
     pub received_bytes: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+/// Measurements recorded by an [`IPerfSink`].
 #[derive(Clone)]
 pub struct IPerfSinkState {
+    /// Latency of each accepted packet, in order of arrival.
     pub latencies: Vec<Duration>,
+    /// Sequence number of each accepted packet, in order of arrival, to detect losses and
+    /// reordering.
     pub indexes: Vec<u32>,
 }
 

@@ -23,8 +23,9 @@
 //! ## Graceful shutdown
 //!
 //! On [`CancellationToken`](tokio_util::sync::CancellationToken) cancellation, the
-//! listener only exits once all in-flight deliveries have completed, ensuring no
-//! messages are silently dropped.
+//! listener stops reading and only exits once the deliveries already submitted to the sink have
+//! completed or failed. Datagrams that are still waiting in the socket buffer of the operating
+//! system at that moment are not read.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -60,7 +61,9 @@ const BUFFER_RESERVATION_HEADROOM: usize = 100;
 /// 3. Start receiving: [`start_listener()`](Provider::start_listener) — runs the async receive
 ///    loop, dispatching payloads to the given [`MessageSink`].
 pub struct Provider {
+    /// The multicast group this provider listens to.
     pub group: IpAddr,
+    /// `group` as the label of the metrics of this provider (feature `metrics-exporter`).
     #[cfg(feature = "metrics-exporter")]
     pub group_label: Arc<str>,
     topic: Arc<str>,
@@ -104,14 +107,31 @@ impl Provider {
         Ok(())
     }
 
-    /// Get the listening socket
+    /// Returns the listening socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NbdError::Socket`] when the socket doesn't exist: before
+    /// [`subscribe`](Provider::subscribe), and once [`start_listener`](Provider::start_listener)
+    /// has taken it.
     pub fn socket(&self) -> Result<&Socket, NbdError> {
         self.socket
             .as_ref()
             .ok_or_else(|| NbdError::Socket(String::from("The socket doesn't exist yet.")))
     }
 
-    /// Subscribe to the provider's multicast group using IGMP join requests on the specified interface.
+    /// Subscribes to the provider's multicast group on the configured interface, with an IGMP join
+    /// for an IPv4 group and an MLD join for an IPv6 group.
+    ///
+    /// Creates the socket, sets the size of its receive buffer to `max_buffer_size` bytes, enables
+    /// address reuse (and port reuse on Unix) and non-blocking mode, binds it to the provider's
+    /// port on all addresses, then joins the group. An interface of the wrong IP family is replaced
+    /// by the default one, with a warning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NbdError::Socket`] when the binding fails, and [`NbdError::Network`] when the
+    /// socket cannot be created or configured, or the group cannot be joined.
     pub fn subscribe(&mut self, max_buffer_size: &usize) -> Result<(), NbdError> {
         self.create_socket(max_buffer_size)?;
 
@@ -183,7 +203,10 @@ impl Provider {
     ///
     /// # Errors
     ///
-    /// Returns `NbdError::Socket` if the socket has not been created (call [`subscribe`](Provider::subscribe) first).
+    /// Returns [`NbdError::Socket`] if the socket has not been created (call
+    /// [`subscribe`](Provider::subscribe) first), and [`NbdError::Network`] if it cannot be handed
+    /// over to the Tokio runtime. An error while receiving a datagram is not fatal: it is logged and
+    /// counted, and the loop goes on.
     pub async fn start_listener<S: MessageSink>(
         &mut self,
         sink: S,

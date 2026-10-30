@@ -23,7 +23,10 @@ NBD is a CPU-intensive process: performance depends heavily on the combination o
 
 ## Test Environment
 
-> [!NOTE] 
+> [!WARNING]
+> The figures of this document were last updated on 2026-09-10, for `0.1.0-beta`. They haven't been measured again for `0.2.0-beta`, which changed the benchmark sinks (`BenchSink`, `IPerfSink`: checked arithmetic, rejection of invalid timestamps), added saturating arithmetic on the listener's buffer reservation, and replaced the Kafka producer with a `ManagedProducer`. Re-run the campaign with the version you deploy before relying on these numbers.
+
+> [!NOTE]
 > Unless otherwise specified, all results below were obtained on a Debian 13.1 (Trixie) LXC container with 8 vCPU cores and 16 GB RAM, hosted on Proxmox.  
 > While NBD is compatible with Windows, it is developed for and intended to run on Linux.
 
@@ -50,6 +53,7 @@ _(300 seconds)_
 > [!NOTE]
 > In this test, the accuracy column is the percentage of messages successfully received by the Kafka broker over the number of messages received by `nbd`.
 > In the following tests, the accuracy column represents the amount of messages processed by `nbd` over the number of messages sent, either by the tokio generated senders or the `iperf` binary.
+
 ## Internal Process Latency
 
 ### `multi_channel_stress`
@@ -69,9 +73,9 @@ _(300 seconds)_
 |      5      | 100 000    | 87.6        | 100          | 1 181    | 2 954    | 3 668    |
 | 5 (unicast) | 5 000      | 12.9        | 100          | 88       | 213      | 328      |
 
-> [!NOTE] 
+> [!NOTE]
 > Windows results:
-> 
+>
 > |Providers|Pulse (Hz)|Flow (MB/s)|Accuracy (%)|p50 (µs)|p95 (µs)|p99 (µs)|
 > |:-:|---|---|---|---|---|---|
 > |1|100 000|25.3|100|971|2 002|2 493|
@@ -123,11 +127,15 @@ To verify that the gap between requested and measured throughput above comes fro
 |    20     |                   150 |                282.5 |             375 |              75.33% |                   312.5 |                             90.40% |
 |    50     |                    15 |                 98.3 |           93.75 |             104.85% |                   93.75 |                            104.85% |
 
-Once the 2.5 Gb/s link is taken into account, measured throughput consistently lands in the 55–105% range of the theoretical maximum — instead of the near-zero ratios suggested by the raw comparison (e.g. 0.05% at 3 providers / 1,000,000 Mb). This confirms that the throughput ceiling observed under heavy load is a property of the test network's hardware, not a limitation of NBD itself.
+Once the 2.5 Gb/s link is taken into account, the multi-provider runs land between 55% and 105% of the theoretical maximum — instead of the near-zero ratios suggested by the raw comparison (e.g. 0.05% at 3 providers / 1,000,000 Mb). That supports the idea that the throughput ceiling observed under heavy load with several providers is a property of the test network's hardware, not a limitation of NBD itself.
+
+The single-provider runs don't fit that explanation: they plateau at about 64 MB/s, which is 51% of the requested rate at 1,000 Mb and 21% of the 2.5 Gb/s ceiling at 100,000 Mb. Whether that plateau comes from the sender (a single `iperf` stream) or from the receive path of one provider hasn't been established by these tests.
+
+The rows at about 104% (up to 104.85%) are also worth a remark: they are the low-rate runs, where the measured flow exceeds what was requested. The ratio 2²⁰ / 10⁶ is 1.0486, which points to a binary-versus-decimal megabit conversion between the `iperf` command line and the table, rather than to a real excess.
 
 ## Resource Considerations
 
-> [!NOTE] 
+> [!NOTE]
 > Enabling the `metrics-exporter` feature adds overhead and can reduce measured performance. Its use is discouraged in environments that don't require this visibility — especially when running against a large number of providers under heavy network load, close to hardware saturation.
 
 > [!NOTE]

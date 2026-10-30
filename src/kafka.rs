@@ -18,10 +18,14 @@
 //! - [`ManagedProducer::supervise`] is the supervision loop. It is meant to run as one dedicated
 //!   task for the whole life of the daemon.
 //! - [`producer_factory`] builds the factory the supervisor calls to obtain a new producer. It
-//!   **re-reads the configuration file** every time it is called.
+//!   **re-reads the configuration file** every time it is called, and refuses a configuration that
+//!   would weaken the security of the connection compared with the one in force
+//!   ([`SecurityPosture`]).
 //! - [`RecoveryPolicy`] tunes the supervisor: polling interval, back-off and give-up delay.
-//! - [`wait_for_retired_producers`] lets the shutdown sequence wait until every replaced producer
-//!   has actually been destroyed.
+//! - [`ManagedProducer::close`] ends the life of the producer at shutdown: it waits for the last
+//!   user to release it, then for its destruction.
+//! - [`wait_for_retired_producers`] is the lower-level primitive behind it: it waits until the
+//!   reaper thread has destroyed every producer retired so far.
 //!
 //! ## Recovery lifecycle
 //!
@@ -36,6 +40,21 @@
 //! The supervisor wakes up every [`RecoveryPolicy::poll_interval`], or immediately when
 //! [`submit`](MessageSink::submit) notices that the producer is faulted, and checks whether the
 //! current producer has raised a fatal error.
+//!
+//! A configuration refused by the security posture check is a failed attempt like any other: the
+//! supervisor waits, calls the factory again, which re-reads the file, and gives up when
+//! `give_up_after` has elapsed. Restoring the file in the meantime lets the next attempt succeed.
+//!
+//! ## Retiring a producer
+//!
+//! A replaced producer is not destroyed right away, since listeners may still be using it. The
+//! supervisor first waits, polling every 5 ms, for the last user to release it. It then hands the
+//! `librdkafka` client to a dedicated thread, which destroys it, and waits for that to be done.
+//! Each of these two stages is bounded by 5 seconds. On a timeout, a warning is logged and the
+//! producer is destroyed later, once its last user releases it.
+//!
+//! The supervisor does not watch the new producer in the meantime: a retirement can delay the
+//! detection of a new fatal error by up to about 10 seconds.
 //!
 //! The behavior while a producer is faulted, the meaning of a failed recreation, the exported
 //! metrics, the security considerations and a complete example are documented on
@@ -77,6 +96,8 @@ use crate::{
 /// intentionally never joined.
 static REAPER: OnceLock<Sender<ReaperTargets>> = OnceLock::new();
 
+/// Bound of each of the two stages of the retirement of a replaced producer: waiting for its
+/// last user to release it, then waiting for its destruction. See `retire_cell`.
 const RETIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Messages understood by the reaper thread. They are handled in order.
@@ -122,20 +143,22 @@ fn reaper() -> &'static Sender<ReaperTargets> {
     })
 }
 
-/// Blocks until every producer retired so far has been destroyed.
+/// Blocks until every producer handed to the reaper thread so far has been destroyed.
 ///
-/// Meant for the shutdown sequence, to make sure no `librdkafka` client is still being torn down
-/// when the process exits. It queues a marker behind the retired producers on the reaper thread,
-/// and waits for its acknowledgment.
+/// It queues a marker behind the retired producers on the reaper thread, and waits for its
+/// acknowledgment, so that no `librdkafka` client is still being torn down when it returns.
 ///
-/// **This function blocks the calling thread** for up to `timeout`.
+/// **This function blocks the calling thread** for up to `timeout`. From async code, prefer
+/// [`ManagedProducer::close`], which relies on it without blocking the executor.
 ///
-/// The producer currently in use is only retired once the last [`ManagedProducer`] handle
-/// referencing it is dropped. Stop the supervisor and drop every handle first, otherwise that
-/// producer is not waited for.
+/// It only waits for producers that have already been retired. The producer currently in use is
+/// retired once its last user releases it, which this function does not trigger: [`close`] does,
+/// and is the way to end the life of a [`ManagedProducer`].
 ///
 /// Returns `Ok(())` immediately when no producer was ever managed, or when the reaper thread is
 /// gone.
+///
+/// [`close`]: ManagedProducer::close
 ///
 /// # Errors
 ///
@@ -152,6 +175,10 @@ pub fn wait_for_retired_producers(timeout: Duration) -> Result<(), NbdError> {
     }
 }
 
+/// Waits for the acknowledgment of the reaper thread.
+///
+/// Returns `Ok(true)` when the reaper acknowledged, `Ok(false)` when there is no reaper to wait
+/// for, and [`NbdError::Termination`] on a timeout.
 fn wait_for_reaper(timeout: Duration) -> Result<bool, NbdError> {
     match REAPER.get() {
         Some(reaper_tx) => {
@@ -182,9 +209,14 @@ fn wait_for_reaper(timeout: Duration) -> Result<bool, NbdError> {
 ///    queueing, batching and acknowledgments).
 ///
 /// Secrets are resolved and exposed only to fill the `librdkafka` client configuration, which is
-/// local to this function and dropped on return. `librdkafka` keeps its own copy for
-/// authentication and re-authentication. The strings of that client configuration are plain
-/// `String`s: they are released, but not zeroized.
+/// local to this function and dropped on return. The temporary copies this function creates (TLS
+/// key password, OAuth client secret) are zeroized right after use. The SASL username and password
+/// are read straight from `config`: erase them with [`ProducerConfig::erase_secrets`] once the
+/// producer is built, as the daemon does.
+///
+/// What this function cannot erase: the strings of the client configuration are plain `String`s,
+/// released at the end of the function but not zeroized, and `librdkafka` keeps its own copy for
+/// authentication and re-authentication.
 ///
 /// Creating the producer **does not wait for the broker**: `librdkafka` connects in the
 /// background, so success here does not prove that the broker is reachable. The daemon probes the
@@ -285,10 +317,11 @@ pub fn build_producer(config: &ProducerConfig) -> Result<FutureProducer, NbdErro
 ///
 /// A cell is published once and is never mutated afterwards, apart from its `faulted` flag:
 /// replacing the producer means publishing a new cell, with `generation + 1`, in the
-/// [`ProducerContainer`]. The previous cell is dropped as soon as its last reader releases it.
+/// [`ProducerContainer`]. The previous cell is retired by the supervisor once its last reader
+/// has released it, see `retire_cell`.
 pub struct ProducerCell {
-    /// The client. `None` only while the cell is being dropped, once the client has been handed
-    /// over for destruction.
+    /// The client. `None` once it has been handed over for destruction, and for the empty cell
+    /// that [`ManagedProducer::close`] publishes.
     producer: Option<FutureProducer>,
     /// Number of replacements since startup: `0` for the initial producer.
     generation: u64,
@@ -312,6 +345,7 @@ impl ProducerCell {
         }
     }
 
+    /// Hands the producer, if any, over to the reaper thread. Does nothing the second time.
     fn retire_now(&mut self) {
         if let Some(producer) = self.producer.take() {
             retire(producer);
@@ -329,8 +363,9 @@ impl ProducerCell {
 ///
 /// It does not panic: a failure to spawn the reaper thread is handled by [`reaper`], and the
 /// result of the hand-over is ignored. It enforces no security property either: it only releases
-/// a resource. Note that when it returns, the client is not necessarily destroyed yet; the
-/// shutdown sequence waits for that explicitly, see [`wait_for_retired_producers`].
+/// a resource. Note that when it returns, the client is not necessarily destroyed yet. This
+/// implementation is the fallback: the supervisor and [`ManagedProducer::close`] retire cells
+/// explicitly, and wait for the destruction to happen.
 impl Drop for ProducerCell {
     fn drop(&mut self) {
         self.retire_now();
@@ -366,8 +401,10 @@ pub struct ProducerContainer {
 /// during a swap.
 ///
 /// Each replacement increments the *generation* of the producer, see
-/// [`generation`](ManagedProducer::generation). The replaced producer is destroyed by a
-/// dedicated thread, see [`wait_for_retired_producers`] to wait for that at shutdown.
+/// [`generation`](ManagedProducer::generation). The replaced producer is retired: the supervisor
+/// waits for its last user to release it, then has a dedicated thread destroy it (see
+/// [`supervise`](ManagedProducer::supervise)). [`close`](ManagedProducer::close) ends the life of
+/// the producer at shutdown.
 ///
 /// ## Behavior while a producer is faulted
 ///
@@ -377,6 +414,12 @@ pub struct ProducerContainer {
 /// - Messages already in flight on the faulted producer may or may not be delivered: this is up
 ///   to `librdkafka`. NBD never flushes a producer before retiring it.
 /// - As soon as the new producer is published, new submissions use it.
+///
+/// ## After `close`
+///
+/// [`close`](ManagedProducer::close) leaves the handle without a producer, for all its clones:
+/// [`submit`](MessageSink::submit) then fails with [`NbdError::Recovery`], and the supervisor, if
+/// it still ran, would have nothing to watch.
 ///
 /// ## What triggers a recovery
 ///
@@ -393,7 +436,8 @@ pub struct ProducerContainer {
 /// the broker is unreachable, and, unlike at startup, the broker is not probed afterwards. A
 /// recreation fails, and counts against `kafka.recovery_timeout`, when the factory fails:
 /// unreadable or invalid configuration file, unresolvable secrets, a permission violation on a
-/// secret-bearing file, or TLS/SASL material rejected by `librdkafka`.
+/// secret-bearing file, a configuration refused because it weakens the security of the connection
+/// (see [`SecurityPosture`]), or TLS/SASL material rejected by `librdkafka`.
 ///
 /// ## Metrics
 ///
@@ -416,12 +460,26 @@ pub struct ProducerContainer {
 /// - the configuration file and every file it references (CA, certificate, key, keytab, secret
 ///   files) must stay readable, and protected against unauthorized modification, for the whole
 ///   life of the daemon;
-/// - a change made to the `[kafka]` section after startup (broker, TLS, SASL) takes effect at the
-///   next recreation, without a restart. The other sections are not re-read;
+/// - a change made to the `[kafka]` section after startup takes effect at the next recreation,
+///   without a restart, unless it weakens the security of the connection: the factory compares the
+///   [`SecurityPosture`] of the new configuration with the one of the running producer, and
+///   refuses a removed or replaced CA, a removed client certificate or key, a removed or weaker SASL
+///   mechanism. A change of broker, and everything a posture does not cover (credentials, the
+///   content of the files), is applied. The other sections are not re-read;
 /// - the file permission checks of [`check_secrets`] are enforced again;
-/// - the configuration warnings are muted during the rebuild, so a weakened configuration (for
-///   instance SASL credentials without TLS) is not reported by a warning;
-/// - credentials briefly live again in the process memory while the new producer is built.
+/// - the validation warnings (low timeouts, SASL credentials without TLS, ...) are muted during
+///   the rebuild, but the differences of posture are logged: an error for each refused change, a
+///   warning for each accepted one;
+/// - credentials briefly live again in the process memory while the new producer is built. The
+///   copies NBD owns are erased as soon as the producer exists (the text of the configuration
+///   file is zeroized once parsed, and the temporary [`ProducerConfig`] is erased with
+///   [`ProducerConfig::erase_secrets`]), but the copies held by `librdkafka`, for the new producer
+///   and for the retired one until it is destroyed, are out of NBD's reach.
+///
+/// A refusal is not the end of the story: the attempts go on until `kafka.recovery_timeout`
+/// elapses, then the daemon exits, and a restart reads the file as a startup does, which has no
+/// posture to compare with and accepts whatever the file contains. The check makes a downgrade
+/// loud and delays it, it does not replace the protection of the files.
 ///
 /// See `SECURITY.md` for the corresponding deployment recommendations.
 ///
@@ -433,16 +491,19 @@ pub struct ProducerContainer {
 ///
 /// use nbd::{
 ///     Config, ManagedProducer, RawConfig, RecoveryPolicy, build_producer, producer_factory,
-///     wait_for_retired_producers,
 /// };
 /// use tokio_util::sync::CancellationToken;
 ///
 /// # async fn run() -> Result<(), nbd::NbdError> {
 /// let path = PathBuf::from("config.toml");
-/// let config = Config::try_from(RawConfig::from_path(&path)?)?;
+/// let mut config = Config::try_from(RawConfig::from_path(&path)?)?;
 ///
-/// // Build the first producer and wrap it.
-/// let producer = ManagedProducer::new(build_producer(&config.kafka)?);
+/// // Build the first producer and wrap it, then erase the secrets of the configuration. The
+/// // posture, which holds no secret, is what later rebuilds are compared with.
+/// let built = build_producer(&config.kafka);
+/// config.kafka.erase_secrets();
+/// let posture = config.kafka.posture();
+/// let producer = ManagedProducer::new(built?);
 ///
 /// // Supervise it for the whole life of the daemon.
 /// let policy = RecoveryPolicy::new(Duration::from_millis(config.kafka.recovery_timeout));
@@ -452,18 +513,17 @@ pub struct ProducerContainer {
 ///     let token = token.clone();
 ///     async move {
 ///         supervised
-///             .supervise(policy, producer_factory(path), token)
+///             .supervise(policy, producer_factory(path, posture), token)
 ///             .await
 ///     }
 /// });
 ///
 /// // `producer` can now be handed to every provider as a `MessageSink`.
 ///
-/// // Shutdown: stop the supervisor, drop every handle, wait for the retired producers.
+/// // Shutdown: stop the supervisor, then close the producer.
 /// token.cancel();
 /// let _ = supervisor.await;
-/// drop(producer);
-/// wait_for_retired_producers(Duration::from_secs(5))?;
+/// producer.close(Duration::from_secs(5)).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -522,7 +582,12 @@ impl ManagedProducer {
     /// 3. it calls `factory` (on a blocking thread, since building a producer is not async) until
     ///    it succeeds, spacing the attempts with the back-off. Attempts stop once
     ///    [`RecoveryPolicy::give_up_after`] has elapsed since the first failed one;
-    /// 4. the new producer is published with `generation + 1`, and the old one is retired.
+    /// 4. the new producer is published with `generation + 1`, and the old one is retired: the
+    ///    supervisor waits for its last user to release it, then for its destruction. Each of
+    ///    these two stages is bounded by 5 seconds, and a timeout is only logged.
+    ///
+    /// The supervisor resumes watching once the retirement is over, so it can take up to about
+    /// 10 seconds to notice a new fatal error after a recreation.
     ///
     /// `factory` is typically the result of [`producer_factory`].
     ///
@@ -679,6 +744,27 @@ impl ManagedProducer {
         }
     }
 
+    /// Ends the life of the producer: waits for it to be released, then destroyed.
+    ///
+    /// Call it once, at shutdown, after the listeners and the supervisor have stopped. It:
+    ///
+    /// 1. replaces the current producer by an empty one, for every clone of the handle: from now
+    ///    on, [`submit`](MessageSink::submit) fails with [`NbdError::Recovery`];
+    /// 2. waits, polling every 5 ms, until the last user has released the replaced producer;
+    /// 3. hands it to the reaper thread and waits for its destruction.
+    ///
+    /// Stages 2 and 3 are each bounded by `timeout`, so the call can take up to twice that long.
+    /// The producer is not flushed: drain the transactions in flight first, as the listeners do
+    /// when they stop.
+    ///
+    /// # Errors
+    ///
+    /// - [`NbdError::Termination`] when the destruction of the producer is not confirmed within
+    ///   `timeout`.
+    /// - [`NbdError::TaskPanic`] when the blocking task that waits for the destruction panicked.
+    ///
+    /// When the producer is still in use after `timeout`, a warning is logged and `Ok(())` is
+    /// returned: the producer is then destroyed once its last user releases it.
     pub async fn close(&self, timeout: Duration) -> Result<(), NbdError> {
         let generation = self.generation();
 
@@ -703,8 +789,8 @@ impl ManagedProducer {
 /// - a fatal error yields `NbdError::Kafka(KafkaError::MessageProduction(RDKafkaErrorCode::Fatal))`.
 ///   The first submission to notice it on a given producer also wakes the supervisor up, and every
 ///   one of them is counted for the recovery report;
-/// - [`NbdError::Recovery`] is returned if the cell holds no producer, a defensive case that
-///   should not occur in normal operation.
+/// - [`NbdError::Recovery`] is returned if the handle holds no producer, which is the case after
+///   [`close`](ManagedProducer::close).
 impl MessageSink for ManagedProducer {
     type Transaction =
         std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), NbdError>> + Send>>;
@@ -745,26 +831,39 @@ pub type ProducerFactory = Arc<dyn Fn() -> Result<FutureProducer, NbdError> + Se
 /// Each call of the factory goes through the same steps as the startup, **starting again from the
 /// configuration file** at `config_path`:
 ///
-/// 1. read and parse the file;
+/// 1. read and parse the file, then zeroize the text that was read;
 /// 2. enforce the permission checks on the files that carry secrets ([`check_secrets`]);
 /// 3. validate the `[kafka]` section, with the log output muted;
-/// 4. resolve the secrets again and call [`build_producer`].
+/// 4. compare the [`SecurityPosture`] of that configuration with the current one
+///    ([`SecurityPosture::check_against`]), and stop here, after erasing the secrets, if it weakens
+///    the connection;
+/// 5. resolve the secrets again, call [`build_producer`], then erase the secrets of the temporary
+///    configuration ([`ProducerConfig::erase_secrets`]);
+/// 6. when the producer was built, adopt the posture of the new configuration as the current one.
 ///
 /// As a consequence, an edit of the `[kafka]` section made while the daemon runs (new broker,
-/// rotated credentials, other TLS files) is picked up at the next recreation, and the files it
-/// references must still be readable. Only that section is used: nothing else is reloaded.
-/// The broker is not probed, see [`build_producer`].
+/// rotated credentials, other TLS files) is picked up at the next recreation, unless it weakens
+/// the connection, and the files it references must still be readable. Only that section is used:
+/// nothing else is reloaded. The broker is not probed, see [`build_producer`].
+///
+/// `posture` is the posture of the producer in force when the factory is created, usually the one
+/// of the configuration the daemon started with (see [`ProducerConfig::posture`]). It then follows
+/// the producers that are successfully built: a change that was accepted becomes the reference of
+/// the next comparison, so that, for instance, a client certificate added at runtime cannot be
+/// removed at the next recreation.
 ///
 /// The validation of step 3 runs with `tracing` muted: its warnings (low timeouts, SASL
 /// credentials without TLS, ...) were already emitted at startup and would only be noise at each
-/// attempt, but they are therefore not emitted either for a configuration that was changed since.
+/// attempt. The comparison of step 4 is not muted: it reports an error for each refused change and
+/// a warning for each accepted one.
 ///
 /// # Errors
 ///
 /// Each call of the returned factory fails with [`NbdError::Config`] when the file cannot be
-/// read, is no longer valid TOML, violates the permission checks, or contains an invalid value, and
-/// with the errors of [`build_producer`] otherwise. The message for an invalid TOML file gives the
-/// line and column but does not repeat the offending text, which could contain a secret literal.
+/// read, is no longer valid TOML, violates the permission checks, contains an invalid value, or
+/// weakens the security of the connection, and with the errors of [`build_producer`] otherwise.
+/// The message for an invalid TOML file gives the line and column but does not repeat the
+/// offending text, which could contain a secret literal.
 pub fn producer_factory(config_path: PathBuf, posture: SecurityPosture) -> ProducerFactory {
     let current_posture = Mutex::new(posture);
 
@@ -897,6 +996,16 @@ impl RecoveryPolicy {
     }
 }
 
+/// Retires a replaced producer cell, in two stages that are each bounded by `timeout`:
+///
+/// 1. wait, polling every 5 ms, until `cell` has no other owner than this function, meaning that
+///    every reader has released it. On a timeout, a warning is logged and `Ok(())` is returned:
+///    the cell is dropped, and its producer retired through its `Drop` implementation, once its
+///    last owner releases it;
+/// 2. hand the producer to the reaper thread, and wait (on a blocking thread) for the reaper to
+///    acknowledge. A timeout is an [`NbdError::Termination`].
+///
+/// Cancelling `token` abandons stage 1 with a warning and `Ok(())`.
 async fn retire_cell(
     mut cell: Arc<ProducerCell>,
     timeout: Duration,

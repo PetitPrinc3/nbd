@@ -8,7 +8,7 @@ const ORANGE: &str = "\x1B[38;2;247;76;0m";
 
 /// Prints project metadata, version, build date, architecture, and ASCII art logo.
 ///
-/// Detects terminal capabilities via [`IsTerminal`](std::io::IsTerminal) and respects
+/// Detects terminal capabilities via [`IsTerminal`] and respects
 /// the `NO_COLOR` environment variable. Renders 24-bit TrueColor output in capable
 /// terminals, falling back to monochrome ASCII art otherwise.
 ///

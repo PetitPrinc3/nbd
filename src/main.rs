@@ -14,21 +14,30 @@
 //! NBD daemon entry point.
 //!
 //! Orchestrates the full application lifecycle:
-//! 1. Initialize dynamic log filtering via `tracing_subscriber::reload`
-//! 2. Parse CLI arguments ([`Cli`])
+//! 1. Initialize dynamic log filtering via `tracing_subscriber::reload`: `info`, or the level of
+//!    the `RUST_LOG` environment variable
+//! 2. Parse CLI arguments ([`Cli`]). `--about` prints the build information and exits;
+//!    `--check-config-file` runs steps 3 and 4 on the given file and exits; without
+//!    `--config-file`, the configuration file is `./config.toml`, with an error log
 //! 3. Install a custom panic hook that routes panics to structured `tracing::error!` logs
-//! 4. Parse and validate the TOML configuration ([`RawConfig`] → [`Config`])
-//! 5. Start the optional Prometheus metrics exporter (feature-gated)
-//! 6. Create the Kafka producer ([`build_producer`]) and run a pre-flight broker connectivity
-//!    check via `fetch_metadata`
+//! 4. Parse and validate the TOML configuration ([`RawConfig`] → [`Config`]), after the permission
+//!    checks of the files that carry secrets ([`check_secrets`])
+//! 5. Start the optional Prometheus metrics exporter (feature-gated), then apply the `verbosity` of
+//!    the configuration to the log filter (`RUST_LOG`, when set, takes precedence)
+//! 6. Create the Kafka producer ([`build_producer`]), erase the secrets of the configuration
+//!    (`ProducerConfig::erase_secrets`) whatever the outcome, and run a pre-flight broker
+//!    connectivity check via `fetch_metadata`
 //! 7. Wrap the producer in a [`ManagedProducer`] and spawn its supervisor, which recreates the
-//!    producer after a fatal error (see [`RecoveryPolicy`])
+//!    producer after a fatal error (see [`RecoveryPolicy`]). The [`SecurityPosture`](nbd::SecurityPosture) of the
+//!    configuration is handed to [`producer_factory`], so that a later rebuild cannot weaken the
+//!    connection, and the configuration is then dropped
 //! 8. Spawn one async listener task per provider in a [`JoinSet`]
 //! 9. Monitor signals (Ctrl+C, SIGTERM on Unix) and the health of the listeners and of the
 //!    supervisor for graceful shutdown
-//! 10. Shut down in order, each stage with a 5-second timeout: drain the listeners via
-//!     [`task_termination`], stop the supervisor, drop the managed producer, then wait for the
-//!     retired producers to be destroyed via [`wait_for_retired_producers`]
+//! 10. Shut down in order, each stage bounded by a 5-second timeout: drain the listeners via
+//!     [`task_termination`], stop the supervisor, then close the managed producer
+//!     ([`ManagedProducer::close`]), which waits for it to be released and destroyed (at most
+//!     twice that timeout)
 //!
 //! If a listener or the supervisor fails, or if a shutdown stage fails, the daemon exits with an
 //! error once the shutdown sequence is over.
@@ -68,7 +77,7 @@ type LogReloadHandle = tracing_subscriber::reload::Handle<EnvFilter, tracing_sub
 ///
 /// Initializes the global [`tracing`] subscriber and log reload layer, delegates the
 /// daemon lifecycle execution to [`run`], and formats any fatal [`NbdError`] through
-/// structured logging before returning an appropriate [`ExitCode`].
+/// structured logging before returning an appropriate [`ExitCode`](std::process::ExitCode).
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let (filter_layer, reload_handle) = reload::Layer::new(
@@ -95,7 +104,7 @@ async fn main() -> std::process::ExitCode {
 /// exporter initialization, Kafka connection checks, provider task spawning,
 /// signal handling, and graceful shutdown.
 ///
-/// Returns [`Ok(())`] upon clean exit or an [`NbdError`] if a fatal startup,
+/// Returns `Ok(())` upon clean exit or an [`NbdError`] if a fatal startup,
 /// configuration, or runtime error occurs.
 async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
     let args = Cli::parse();

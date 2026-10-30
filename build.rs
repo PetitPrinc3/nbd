@@ -1,3 +1,13 @@
+//! Build script: injects build-time metadata (`BUILD_DATE`, `BUILD_ARCH`, `BUILD_FEATURES`,
+//! `BUILD_VERSION_FULL`) used by `--about` and `--version`.
+//!
+//! The build date is the current UTC time, or the time given by `SOURCE_DATE_EPOCH` when it is set,
+//! which makes the build reproducible. A `SOURCE_DATE_EPOCH` that is not an integer is read as `0`
+//! (1970-01-01), and one that is out of range makes the build script panic.
+//!
+//! The enabled Cargo features are listed in `BUILD_FEATURES` and appended to the package version
+//! in `BUILD_VERSION_FULL`, e.g. `0.2.0-beta [+kafka-tls]`.
+
 use chrono::{TimeZone, Utc};
 use std::env;
 
@@ -26,18 +36,18 @@ fn main() {
         .collect();
 
     enabled_features.sort();
+    enabled_features.retain(|f| *f != "default");
 
-    let features_str = enabled_features
-        .iter()
-        .filter(|f| *f != "default")
-        .map(|f| format!(" [+{}", f))
-        .collect::<Vec<_>>()
-        .join("]")
-        + if enabled_features.is_empty() {
-            " "
-        } else {
-            "]"
-        };
+    let features_str = if enabled_features.is_empty() {
+        " "
+    } else {
+        &(enabled_features
+            .iter()
+            .map(|f| format!(" [+{}", f))
+            .collect::<Vec<_>>()
+            .join("]")
+            + "]")
+    };
 
     let pkg_version = env::var("CARGO_PKG_VERSION").unwrap_or_default();
 
