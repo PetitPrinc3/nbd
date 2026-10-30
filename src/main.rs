@@ -1,17 +1,46 @@
 #![forbid(unsafe_code)]
-#![deny(clippy::mem_forget)]
+#![deny(
+    clippy::mem_forget,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
 //! NBD daemon entry point.
 //!
 //! Orchestrates the full application lifecycle:
-//! 1. Initialize dynamic log filtering via `tracing_subscriber::reload`
-//! 2. Parse CLI arguments ([`Cli`])
+//! 1. Initialize dynamic log filtering via `tracing_subscriber::reload`: `info`, or the level of
+//!    the `RUST_LOG` environment variable
+//! 2. Parse CLI arguments ([`Cli`]). `--about` prints the build information and exits;
+//!    `--check-config-file` runs steps 3 and 4 on the given file and exits; without
+//!    `--config-file`, the configuration file is `./config.toml`, with an error log
 //! 3. Install a custom panic hook that routes panics to structured `tracing::error!` logs
-//! 4. Parse and validate the TOML configuration ([`RawConfig`] → [`Config`])
-//! 5. Start the optional Prometheus metrics exporter (feature-gated)
-//! 6. Pre-flight Kafka broker connectivity check via `fetch_metadata`
-//! 7. Spawn one async listener task per provider in a [`JoinSet`]
-//! 8. Monitor signals (Ctrl+C, SIGTERM on Unix) and task health for graceful shutdown
-//! 9. Drain all in-flight tasks with a 5-second timeout via [`task_termination`]
+//! 4. Parse and validate the TOML configuration ([`RawConfig`] → [`Config`]), after the permission
+//!    checks of the files that carry secrets ([`check_secrets`])
+//! 5. Start the optional Prometheus metrics exporter (feature-gated), then apply the `verbosity` of
+//!    the configuration to the log filter (`RUST_LOG`, when set, takes precedence)
+//! 6. Create the Kafka producer ([`build_producer`]), erase the secrets of the configuration
+//!    (`ProducerConfig::erase_secrets`) whatever the outcome, and run a pre-flight broker
+//!    connectivity check via `fetch_metadata`
+//! 7. Wrap the producer in a [`ManagedProducer`] and spawn its supervisor, which recreates the
+//!    producer after a fatal error (see [`RecoveryPolicy`]). The [`SecurityPosture`](nbd::SecurityPosture) of the
+//!    configuration is handed to [`producer_factory`], so that a later rebuild cannot weaken the
+//!    connection, and the configuration is then dropped
+//! 8. Spawn one async listener task per provider in a [`JoinSet`]
+//! 9. Monitor signals (Ctrl+C, SIGTERM on Unix) and the health of the listeners and of the
+//!    supervisor for graceful shutdown
+//! 10. Shut down in order, each stage bounded by a 5-second timeout: drain the listeners via
+//!     [`task_termination`], stop the supervisor, then close the managed producer
+//!     ([`ManagedProducer::close`]), which waits for it to be released and destroyed (at most
+//!     twice that timeout)
+//!
+//! If a listener or the supervisor fails, or if a shutdown stage fails, the daemon exits with an
+//! error once the shutdown sequence is over.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -19,7 +48,6 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use rdkafka::config::ClientConfig;
 use rdkafka::producer::Producer;
 
 use tracing::{debug, error, info, warn};
@@ -27,14 +55,15 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt, reload};
 
-use secrecy::ExposeSecret;
-
 #[cfg(feature = "metrics-exporter")]
 use metrics_exporter_prometheus::PrometheusBuilder;
 
 use clap::Parser;
 
-use nbd::{AuthConfig, Config, NbdError, Provider, RawConfig, check_secrets};
+use nbd::{
+    Config, ManagedProducer, NbdError, Provider, RawConfig, RecoveryPolicy, build_producer,
+    check_secrets, producer_factory,
+};
 
 mod args;
 use args::Cli;
@@ -48,7 +77,7 @@ type LogReloadHandle = tracing_subscriber::reload::Handle<EnvFilter, tracing_sub
 ///
 /// Initializes the global [`tracing`] subscriber and log reload layer, delegates the
 /// daemon lifecycle execution to [`run`], and formats any fatal [`NbdError`] through
-/// structured logging before returning an appropriate [`ExitCode`].
+/// structured logging before returning an appropriate [`ExitCode`](std::process::ExitCode).
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let (filter_layer, reload_handle) = reload::Layer::new(
@@ -75,7 +104,7 @@ async fn main() -> std::process::ExitCode {
 /// exporter initialization, Kafka connection checks, provider task spawning,
 /// signal handling, and graceful shutdown.
 ///
-/// Returns [`Ok(())`] upon clean exit or an [`NbdError`] if a fatal startup,
+/// Returns `Ok(())` upon clean exit or an [`NbdError`] if a fatal startup,
 /// configuration, or runtime error occurs.
 async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
     let args = Cli::parse();
@@ -92,7 +121,9 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
     if let Some(config_path) = args.check_config_file {
         let raw_config = RawConfig::from_path(&config_path)?;
         check_secrets(&raw_config.kafka, &config_path)?;
-        Config::try_from(raw_config)?;
+
+        let mut config = Config::try_from(raw_config)?;
+        config.kafka.erase_secrets();
 
         info!("The provided configuration file is valid and can be used as-is.");
         return Ok(());
@@ -113,7 +144,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
 
     let raw_config = RawConfig::from_path(&config_path)?;
     check_secrets(&raw_config.kafka, &config_path)?;
-    let config = Config::try_from(raw_config)?;
+    let mut config = Config::try_from(raw_config)?;
 
     #[cfg(feature = "metrics-exporter")]
     match PrometheusBuilder::new()
@@ -164,92 +195,11 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
         config.kafka.broker
     );
 
-    let mut kafka_config = ClientConfig::new();
+    let producer_candidate = build_producer(&config.kafka);
 
-    // TLS config application
-    if let Some(ref tls_config) = config.kafka.tls {
-        kafka_config.set("ssl.ca.location", tls_config.ca_file.display().to_string());
-        if let Some(cert_file) = &tls_config.cert_file {
-            kafka_config.set("ssl.certificate.location", cert_file.display().to_string());
-        }
-        if let Some(key_file) = &tls_config.key_file {
-            kafka_config.set("ssl.key.location", key_file.display().to_string());
-        }
-        if let Some(key_password) = &tls_config.key_password {
-            kafka_config.set("ssl.key.password", key_password.resolve()?.expose_secret());
-        }
-    };
+    config.kafka.erase_secrets();
 
-    // Authentication config application
-    kafka_config.set(
-        "security.protocol",
-        config.kafka.security_protocol.to_string(),
-    );
-
-    if let Some(ref auth_config) = config.kafka.auth {
-        match auth_config {
-            AuthConfig::Credentials(credentials) => {
-                kafka_config.set("sasl.mechanism", credentials.mechanism.as_str());
-                kafka_config.set("sasl.username", credentials.username.expose_secret());
-                kafka_config.set("sasl.password", credentials.password.expose_secret());
-            }
-            #[cfg(feature = "kafka-auth-gssapi")]
-            AuthConfig::Kerberos(kerberos) => {
-                kafka_config.set("sasl.mechanism", "GSSAPI");
-                kafka_config.set("sasl.kerberos.principal", &kerberos.principal);
-                kafka_config.set(
-                    "sasl.kerberos.keytab",
-                    kerberos.keytab.display().to_string(),
-                );
-                kafka_config.set("sasl.kerberos.service.name", &kerberos.service_name);
-            }
-            #[cfg(feature = "kafka-auth-oauth")]
-            AuthConfig::OAuth(oauth) => {
-                kafka_config.set("sasl.mechanism", "OAUTHBEARER");
-                kafka_config.set("sasl.oauthbearer.method", "oidc");
-                kafka_config.set("sasl.oauthbearer.client.id", &oauth.client_id);
-                kafka_config.set(
-                    "sasl.oauthbearer.client.secret",
-                    oauth.client_secret.resolve()?.expose_secret(),
-                );
-                kafka_config.set(
-                    "sasl.oauthbearer.token.endpoint.url",
-                    &oauth.token_endpoint_url,
-                );
-                if let Some(scope) = &oauth.scope {
-                    kafka_config.set("sasl.oauthbearer.scope", scope);
-                }
-                if let Some(extensions) = &oauth.extensions {
-                    kafka_config.set("sasl.oauthbearer.extensions", extensions);
-                }
-            }
-        }
-    };
-
-    let kafka_producer = match kafka_config
-        .set("bootstrap.servers", &config.kafka.broker)
-        .set(
-            "message.timeout.ms",
-            config.kafka.message_timeout.to_string(),
-        )
-        .set(
-            "message.send.max.retries",
-            config.kafka.message_retries.to_string(),
-        )
-        .set("compression.type", config.kafka.compression.to_string())
-        .set(
-            "max.in.flight.requests.per.connection",
-            config.kafka.parallel_requests.to_string(),
-        )
-        .set(
-            "queue.buffering.max.messages",
-            config.kafka.queue_size.to_string(),
-        )
-        .set("enable.idempotence", config.kafka.idempotence.to_string())
-        .set("linger.ms", config.kafka.linger.to_string())
-        .set("acks", config.kafka.acks.to_string())
-        .create::<rdkafka::producer::FutureProducer>()
-    {
+    let kafka_producer = match producer_candidate {
         Ok(producer) => {
             match producer
                 .client()
@@ -273,19 +223,32 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
         Err(e) => {
             error!("A fatal error occured : {}", e);
             cancel_token.cancel();
-            return Err(NbdError::Kafka(e));
+            return Err(e);
         }
     };
+
+    let recovery_policy = RecoveryPolicy::new(Duration::from_millis(config.kafka.recovery_timeout));
+    let producer_manager = ManagedProducer::new(kafka_producer);
+
+    let factory = producer_factory(config_path, config.kafka.posture());
+
+    let mut supervisor_manager = producer_manager.clone();
+    let supervisor_token = cancel_token.clone();
+
+    let mut supervisor_task = tokio::spawn(async move {
+        supervisor_manager
+            .supervise(recovery_policy, factory, supervisor_token)
+            .await
+    });
 
     // Dropping unnecessary copies of the Kafka configuration.
     // This ensures that unnecessary copies of the secrets are not kept in memory.
     // The only remaining secrets become the ones stored by librdkafka and required for authentication and reauthentication.
     drop(config.kafka);
-    drop(kafka_config);
 
     for mut provider in providers {
         let task_tk = cancel_token.clone();
-        let task_producer = kafka_producer.clone();
+        let task_producer = producer_manager.clone();
 
         listener_tasks.spawn(async move {
             match provider.subscribe(&config.nbd.socket_buffer_size) {
@@ -314,6 +277,8 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
 
     info!("NBD started successfully and is ready to accept incoming traffic.");
 
+    let mut process_error: Option<NbdError> = None;
+
     #[cfg(unix)]
     tokio::select! {
         _ = ctrl_c => { info!("Received Ctrl+C signal, stopping NBD."); cancel_token.cancel(); }
@@ -327,6 +292,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
                 Ok(Err(e)) => {
                     error!("A fatal error occured with one or more listener : {}", e);
                     error!("NBD will now try to stop gracefully.");
+                    process_error = Some(e);
                     cancel_token.cancel();
                 }
                 Err(e) => {
@@ -335,6 +301,30 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
                     } else {
                         warn!("A listener was cancelled : {}", e);
                     }
+                    process_error = Some(NbdError::from(e));
+                    cancel_token.cancel();
+                }
+            }
+        }
+        res = &mut supervisor_task => {
+            match res {
+                Ok(Ok(())) => {
+                    debug!("The supervisor stopped gracefully.");
+                },
+                Ok(Err(e)) => {
+                    error!("A fatal error occured with the supervisor : {}", e);
+                    error!("NBD will now try to stop gracefully.");
+                    process_error = Some(e);
+                    cancel_token.cancel();
+                }
+                Err(e) => {
+                    if e.is_panic() {
+                        error!("NBD panicked while supervising the Kafka producer : {}", e);
+                    } else {
+                        error!("The producer was cancelled : {}", e);
+                        error!("NBD will now try to stop gracefully.");
+                    }
+                    process_error = Some(NbdError::from(e));
                     cancel_token.cancel();
                 }
             }
@@ -353,6 +343,7 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
                 Ok(Err(e)) => {
                     error!("A fatal error occured with one or more listener : {}", e);
                     error!("NBD will now try to stop gracefully.");
+                    process_error = Some(e);
                     cancel_token.cancel();
                 }
                 Err(e) => {
@@ -361,21 +352,95 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
                     } else {
                         warn!("A listener was cancelled : {}", e);
                     }
+                    process_error = Some(NbdError::from(e));
+                    cancel_token.cancel();
+                }
+            }
+        }
+        res = &mut supervisor_task => {
+            match res {
+                Ok(Ok(())) => {
+                    debug!("The supervisor stopped gracefully.");
+                },
+                Ok(Err(e)) => {
+                    error!("A fatal error occured with the supervisor : {}", e);
+                    error!("NBD will now try to stop gracefully.");
+                    process_error = Some(e);
+                    cancel_token.cancel();
+                }
+                Err(e) => {
+                    if e.is_panic() {
+                        error!("NBD panicked while supervising the Kafka producer : {}", e);
+                    } else {
+                        error!("The producer was cancelled : {}", e);
+                        error!("NBD will now try to stop gracefully.");
+                    }
+                    process_error = Some(NbdError::from(e));
                     cancel_token.cancel();
                 }
             }
         }
     }
 
-    match task_termination(listener_tasks).await {
+    let listener_termination = match task_termination(listener_tasks).await {
         Ok(_) => {
-            info!("NBD exited gracefully.");
+            info!("All listeners were stopped gracefully.");
             Ok(())
         }
         Err(e) => {
-            error!("Failed to stop gracefully : {}", e);
+            error!("Failed to terminate some listeners : {}", e);
             Err(e)
         }
+    };
+
+    let supervisor_termination = if !supervisor_task.is_finished() {
+        match tokio::time::timeout(Duration::from_secs(5), &mut supervisor_task).await {
+            Ok(Ok(Ok(()))) => {
+                info!("Supervisor task stopped gracefully.");
+                Ok(())
+            }
+            Ok(Ok(Err(e))) => {
+                warn!("The supervisor task failed : {}", e);
+                Err(e)
+            }
+            Ok(Err(e)) => {
+                warn!("The supervisor task failed : {}", e);
+                Err(NbdError::from(e))
+            }
+            Err(e) => {
+                error!("Failed to terminate the supervisor task gracefully : {e}");
+                Err(NbdError::Termination(String::from(
+                    "Failed to terminate the supervisor task gracefully.",
+                )))
+            }
+        }
+    } else {
+        Ok(())
+    };
+
+    let producer_termination = match producer_manager.close(Duration::from_secs(5)).await {
+        Ok(()) => {
+            info!("All producers were stopped gracefully.");
+            Ok(())
+        }
+        Err(e) => {
+            error!("Failed to terminate some producers : {}", e);
+            Err(e)
+        }
+    };
+
+    match listener_termination {
+        Ok(_) => match producer_termination {
+            Ok(()) => match supervisor_termination {
+                Ok(()) => match process_error {
+                    Some(e) => Err(e),
+                    None => Ok(()),
+                },
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
     }
 }
 

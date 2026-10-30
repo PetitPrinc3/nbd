@@ -6,13 +6,18 @@
 //!
 //! ## Implementations
 //!
-//! - [`FutureProducer`](rdkafka::producer::FutureProducer) — Production sink delivering messages to Kafka.
+//! - [`ManagedProducer`](crate::ManagedProducer) — Production sink delivering messages to Kafka.
+//!   It wraps a [`FutureProducer`] and replaces it when the producer raises a fatal error.
+//! - [`FutureProducer`] — The plain Kafka sink that [`ManagedProducer`](crate::ManagedProducer)
+//!   builds on. It does not recover from a fatal error.
 //! - [`BenchSink`] — In-memory sink for internal latency benchmarking with nanosecond timestamps.
 //! - [`IPerfSink`] — Mock sink parsing standard iperf UDP packets for packet loss and latency analysis.
 
 use bytes::Bytes;
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use tracing::{debug, warn};
@@ -21,9 +26,25 @@ use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::producer::FutureProducer;
 use rdkafka::producer::FutureRecord;
 
+use arc_swap::ArcSwap;
+
 use crate::errors::NbdError;
 
 const UNIX_EPOCH: SystemTime = SystemTime::UNIX_EPOCH;
+
+/// Time reference of the delivery failure log throttling, set when the first failure happens.
+static LOG_CLOCK: OnceLock<Instant> = OnceLock::new();
+/// Throttle state of the delivery failure logs: for each topic, the second (counted from
+/// [`LOG_CLOCK`]) at which a failure was last logged.
+///
+/// Copy-on-write map behind an [`ArcSwap`], so that the usual path is a lock-free read. It holds
+/// one entry per topic, so its size is bounded by the topics of the configured providers.
+static LOG_LOCKS: LazyLock<ArcSwap<HashMap<Arc<str>, Arc<AtomicU64>>>> =
+    LazyLock::new(|| ArcSwap::from_pointee(HashMap::new()));
+/// Serializes the insertion of a new topic in [`LOG_LOCKS`].
+static LOG_WRITER: Mutex<()> = Mutex::new(());
+/// Minimum delay, in seconds, between two logged delivery failures for the same topic.
+const LOG_THRESHOLD: u64 = 1;
 
 /// Trait abstracting the non-blocking submission and asynchronous delivery confirmation of a message.
 ///
@@ -37,95 +58,182 @@ const UNIX_EPOCH: SystemTime = SystemTime::UNIX_EPOCH;
 ///   delivery confirmation, or returns [`NbdError::Backpressure`] if the sink queue is full.
 /// - Awaiting the returned [`Transaction`](MessageSink::Transaction) future confirms delivery
 ///   or yields an error.
-///
-/// # Arguments
-///
-/// * `topic` — The Kafka topic (or logical channel) to deliver the message to.
-/// * `payload` — The raw message bytes, produced via zero-copy `BytesMut::split_to().freeze()`.
 pub trait MessageSink: Clone + Send + 'static {
+    /// Future that resolves when the delivery of a submitted message is confirmed, or has failed.
     type Transaction: std::future::Future<Output = Result<(), NbdError>> + Send + 'static;
 
+    /// Submits a message without blocking, and returns the future that confirms its delivery.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` — The Kafka topic (or logical channel) to deliver the message to.
+    /// * `payload` — The raw message bytes, produced via zero-copy `BytesMut::split_to().freeze()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NbdError::Backpressure`] when the sink cannot take the message because its queue
+    /// is full, and another [`NbdError`] when the message is rejected (the Kafka sinks return
+    /// [`NbdError::Kafka`], and [`ManagedProducer`](crate::ManagedProducer) returns
+    /// [`NbdError::Recovery`] while it has no producer). A rejected message is dropped: the caller
+    /// does not retry it.
     fn submit(&self, topic: Arc<str>, payload: Bytes) -> Result<Self::Transaction, NbdError>;
 }
 
-/// Production [`MessageSink`] implementation that delivers messages to a Kafka broker
-/// via `rdkafka::FutureProducer`.
+/// Delivery confirmation future returned for a Kafka message.
+pub(crate) type KafkaTransaction =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), NbdError>> + Send>>;
+
+/// Plain Kafka [`MessageSink`] delivering messages to a broker through
+/// [`FutureProducer`].
 ///
 /// Submits messages non-blockingly using `send_result`. If the librdkafka producer queue is full,
-/// immediately returns [`NbdError::Backpressure`]. When the `metrics-exporter` feature is enabled,
-/// end-to-end latency is computed in the transaction future by extracting the transmit timestamp
-/// from payload bytes `[4..12]` (iperf-compatible header: `u32` seconds + `u32` microseconds)
-/// and recording the delta in the `nbd_e2e_latency` Prometheus histogram.
+/// immediately returns [`NbdError::Backpressure`]; any other error raised while enqueuing, such as
+/// a fatal producer error, is returned as [`NbdError::Kafka`].
+///
+/// The returned [`Transaction`](MessageSink::Transaction) future resolves when the broker has
+/// answered:
+///
+/// - on success, it yields `Ok(())` and, with the `metrics-exporter` feature, increments
+///   `nbd_kafka_sent_total` for the topic;
+/// - on a delivery failure, it yields [`NbdError::Kafka`] and, with the `metrics-exporter`
+///   feature, increments `nbd_errors_kafka_transmission_total` for the topic. The matching
+///   warning is logged at most once per second and per topic, so that a broker outage cannot
+///   flood the logs: without the metrics exporter, the occurrences that are not logged are not
+///   counted anywhere;
+/// - if the delivery is canceled before any confirmation arrives (typically because the producer
+///   was destroyed), it yields [`NbdError::Backpressure`] and logs a warning each time.
+///
+/// This sink does not recover from a fatal producer error. The daemon uses
+/// [`ManagedProducer`](crate::ManagedProducer) instead, which builds on it.
 impl MessageSink for FutureProducer {
     type Transaction =
         std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), NbdError>> + Send>>;
 
     fn submit(&self, topic: Arc<str>, payload: Bytes) -> Result<Self::Transaction, NbdError> {
-        let record: FutureRecord<[u8], [u8]> = FutureRecord::to(&topic).payload(&payload);
-        match self.send_result(record) {
-            Ok(delivery_future) => {
-                Ok(Box::pin(async move {
-                    match delivery_future.await {
-                        Ok(Ok(_offset_info)) => {
-                            #[cfg(feature = "metrics-exporter")]
-                            {
-                                // This section is only used for testing by computing latencies for the end-to-end test.
-                                //    if payload.len() > 12 {
-                                //        let ts_rx = SystemTime::now();
+        submit_on(self, topic, payload)
+    }
+}
 
-                                //        //let pkt_idx = u32::from_be_bytes(payload[..4].try_into().unwrap());
+/// Enqueues a message on `producer` and returns the future that confirms its delivery.
+///
+/// Shared implementation of [`MessageSink::submit`] for the plain [`FutureProducer`] sink and for
+/// [`ManagedProducer`](crate::ManagedProducer). The errors and the semantics of the returned
+/// future are those documented on the `MessageSink` implementation of [`FutureProducer`].
+///
+/// The delivery failure warning is throttled to one per topic every [`LOG_THRESHOLD`] seconds,
+/// see [`LOG_LOCKS`].
+pub(crate) fn submit_on(
+    producer: &FutureProducer,
+    topic: Arc<str>,
+    payload: Bytes,
+) -> Result<KafkaTransaction, NbdError> {
+    let record: FutureRecord<[u8], [u8]> = FutureRecord::to(&topic).payload(&payload);
+    match producer.send_result(record) {
+        Ok(delivery_future) => {
+            Ok(Box::pin(async move {
+                match delivery_future.await {
+                    Ok(Ok(_offset_info)) => {
+                        #[cfg(feature = "metrics-exporter")]
+                        {
+                            // This section is only used for testing by computing latencies for the end-to-end test.
+                            //    if payload.len() > 12 {
+                            //        let ts_rx = SystemTime::now();
 
-                                //        let ts_tx =
-                                //            u32::from_be_bytes(payload[4..8].try_into().unwrap())
-                                //                as u64;
-                                //        let ts_tx_micros = (ts_tx * 1_000_000
-                                //            + (u32::from_be_bytes(payload[8..12].try_into().unwrap())
-                                //                as u64))
-                                //            as u128;
-                                //        let ts_rx_micros =
-                                //            ts_rx.duration_since(UNIX_EPOCH).unwrap().as_micros();
-                                //        let latency =
-                                //            Duration::from_micros((ts_rx_micros - ts_tx_micros) as u64);
+                            //        //let pkt_idx = u32::from_be_bytes(payload[..4].try_into().unwrap());
 
-                                //        metrics::histogram!("nbd_e2e_latency").record(latency);
-                                //    };
-                                metrics::counter!("nbd_kafka_sent_total", "topic" => topic.clone())
-                                    .increment(1);
-                            }
+                            //        let ts_tx =
+                            //            u32::from_be_bytes(payload[4..8].try_into().unwrap())
+                            //                as u64;
+                            //        let ts_tx_micros = (ts_tx * 1_000_000
+                            //            + (u32::from_be_bytes(payload[8..12].try_into().unwrap())
+                            //                as u64))
+                            //            as u128;
+                            //        let ts_rx_micros =
+                            //            ts_rx.duration_since(UNIX_EPOCH).unwrap().as_micros();
+                            //        let latency =
+                            //            Duration::from_micros((ts_rx_micros - ts_tx_micros) as u64);
 
-                            debug!("Successfully sent some message on topic {} !", &topic);
-
-                            Ok(())
-                        }
-                        Ok(Err((e, _msg))) => {
-                            #[cfg(feature = "metrics-exporter")]
-                            metrics::counter!("nbd_errors_kafka_total", "topic" => topic.clone())
+                            //        metrics::histogram!("nbd_e2e_latency").record(latency);
+                            //    };
+                            metrics::counter!("nbd_kafka_sent_total", "topic" => topic.clone())
                                 .increment(1);
+                        }
 
-                            warn!("Failed to send one message on topic {} : {}", &topic, e);
-                            Err(NbdError::Kafka(e))
-                        }
-                        Err(_canceled) => {
-                            warn!(
-                                "Producer canceled before send confirmation for one message on topic {}.",
-                                &topic
-                            );
-                            Err(NbdError::Backpressure(format!(
-                                "Failed to send one message on topic {} because the producer was cancelled.",
-                                topic
-                            )))
-                        }
+                        debug!("Successfully sent some message on topic {} !", &topic);
+
+                        Ok(())
                     }
-                }))
-            }
-            Err((KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull), _record)) => {
-                Err(NbdError::Backpressure(format!(
-                    "Failed to send one message on topic {} because the queue is full.",
-                    topic
-                )))
-            }
-            Err((e, _record)) => Err(NbdError::Kafka(e)),
+                    Ok(Err((e, _msg))) => {
+                        #[cfg(feature = "metrics-exporter")]
+                        metrics::counter!("nbd_errors_kafka_transmission_total", "topic" => topic.clone())
+                            .increment(1);
+
+                        let elapsed: u64 = LOG_CLOCK.get_or_init(Instant::now).elapsed().as_secs();
+                        let log_locks = LOG_LOCKS.load();
+
+                        match log_locks.get(&topic) {
+                            Some(seconds) => {
+                                let resolved_seconds = seconds.load(Ordering::Relaxed);
+                                if elapsed.saturating_sub(resolved_seconds) >= LOG_THRESHOLD
+                                    && seconds
+                                        .compare_exchange(
+                                            resolved_seconds,
+                                            elapsed,
+                                            Ordering::Relaxed,
+                                            Ordering::Relaxed,
+                                        )
+                                        .is_ok()
+                                {
+                                    warn!("Failed to send one message on topic {} : {}", &topic, e);
+                                }
+                            }
+                            None => {
+                                let is_new = {
+                                    let _writer =
+                                        LOG_WRITER.lock().unwrap_or_else(|e| e.into_inner());
+                                    let current = LOG_LOCKS.load();
+                                    if current.contains_key(&topic) {
+                                        false
+                                    } else {
+                                        let mut copy = HashMap::clone(&current);
+                                        copy.insert(
+                                            topic.clone(),
+                                            Arc::new(AtomicU64::new(elapsed)),
+                                        );
+                                        LOG_LOCKS.store(Arc::new(copy));
+                                        true
+                                    }
+                                };
+
+                                if is_new {
+                                    warn!("Failed to send one message on topic {} : {}", &topic, e);
+                                }
+                            }
+                        }
+
+                        Err(NbdError::Kafka(e))
+                    }
+                    Err(_canceled) => {
+                        warn!(
+                            "Producer canceled before send confirmation for one message on topic {}.",
+                            &topic
+                        );
+
+                        Err(NbdError::Backpressure(format!(
+                            "Failed to send one message on topic {} because the producer was cancelled.",
+                            topic
+                        )))
+                    }
+                }
+            }))
         }
+        Err((KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull), _record)) => {
+            Err(NbdError::Backpressure(format!(
+                "Failed to send one message on topic {} because the queue is full.",
+                topic
+            )))
+        }
+        Err((e, _record)) => Err(NbdError::Kafka(e)),
     }
 }
 
@@ -136,11 +244,22 @@ impl MessageSink for FutureProducer {
 ///
 /// Uses lock-free atomic counters (`Relaxed` ordering) on the hot path for message/byte
 /// counting, and a `Mutex<Vec<Duration>>` for latency recording.
+///
+/// # Errors
+///
+/// [`submit`](MessageSink::submit) returns [`NbdError::InvalidPacket`], without panicking, when
+/// the payload is shorter than 8 bytes, when its timestamp cannot be turned into an instant, when
+/// that timestamp is later than the moment the packet is received, or when the latency list cannot
+/// be locked (poisoned mutex). A rejected packet is not counted.
 #[derive(Clone)]
 pub struct BenchSink {
+    /// Time origin of the timestamps carried by the payloads.
     pub epoch: Instant,
+    /// Number of messages accepted so far.
     pub received_messages: Arc<std::sync::atomic::AtomicU64>,
+    /// Number of payload bytes accepted so far.
     pub received_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    /// Latency of each accepted message, in order of arrival.
     pub latencies: Arc<Mutex<Vec<Duration>>>,
 }
 
@@ -168,17 +287,46 @@ impl MessageSink for BenchSink {
             )));
         }
 
-        let ts_tx_ns = u64::from_be_bytes(payload[..8].try_into().unwrap());
-        let ts_tx = self.epoch + Duration::from_nanos(ts_tx_ns);
+        let ts_tx_ns = match payload.get(..8) {
+            Some(payload) => match <[u8; 8]>::try_from(payload) {
+                Ok(vec) => u64::from_be_bytes(vec),
+                Err(_) => {
+                    return Err(NbdError::InvalidPacket(String::from(
+                        "Failed to convert first 8 bytes of packet to u64",
+                    )));
+                }
+            },
+            None => {
+                return Err(NbdError::InvalidPacket(format!(
+                    "Failed to get first 8 bytes of packet with len : {}",
+                    payload.len()
+                )));
+            }
+        };
+
+        if let Some(ts) = self.epoch.checked_add(Duration::from_nanos(ts_tx_ns))
+            && let Ok(mut latencies) = self.latencies.lock()
+        {
+            match ts_rx.checked_duration_since(ts) {
+                Some(latency) => {
+                    latencies.push(latency);
+                }
+                None => {
+                    return Err(NbdError::InvalidPacket(String::from(
+                        "Invalid timestamp in packet.",
+                    )));
+                }
+            }
+        } else {
+            return Err(NbdError::InvalidPacket(String::from(
+                "Failed to determine latency for one packet.",
+            )));
+        }
 
         self.received_messages
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.received_bytes
             .fetch_add(payload.len(), std::sync::atomic::Ordering::Relaxed);
-        self.latencies
-            .lock()
-            .unwrap()
-            .push(ts_rx.duration_since(ts_tx));
 
         Ok(std::future::ready(Ok(())))
     }
@@ -192,17 +340,31 @@ impl MessageSink for BenchSink {
 /// - Bytes `[8..12]`: `u32` transmit timestamp microseconds (big-endian)
 ///
 /// Tracks sequence numbers for out-of-order and packet loss detection.
-/// Rejects packets shorter than 12 bytes with [`NbdError::InvalidPacket`].
+///
+/// # Errors
+///
+/// [`submit`](MessageSink::submit) rejects a packet with [`NbdError::InvalidPacket`], without
+/// panicking, when it is shorter than 12 bytes, when its transmit timestamp is later than the
+/// moment it is received (for instance because the clocks of the sender and of the host are not
+/// synchronized), or when the state cannot be locked (poisoned mutex). A rejected packet is not
+/// counted.
 #[derive(Clone)]
 pub struct IPerfSink {
+    /// Latencies and sequence numbers recorded so far.
     pub state: Arc<Mutex<IPerfSinkState>>,
+    /// Number of packets accepted so far.
     pub received_messages: Arc<std::sync::atomic::AtomicU64>,
+    /// Number of payload bytes accepted so far.
     pub received_bytes: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+/// Measurements recorded by an [`IPerfSink`].
 #[derive(Clone)]
 pub struct IPerfSinkState {
+    /// Latency of each accepted packet, in order of arrival.
     pub latencies: Vec<Duration>,
+    /// Sequence number of each accepted packet, in order of arrival, to detect losses and
+    /// reordering.
     pub indexes: Vec<u32>,
 }
 
@@ -232,20 +394,79 @@ impl MessageSink for IPerfSink {
             )));
         }
 
-        let pkt_idx = u32::from_be_bytes(payload[..4].try_into().unwrap());
+        let pkt_idx = match payload.get(..4) {
+            Some(payload) => match <[u8; 4]>::try_from(payload) {
+                Ok(vec) => u32::from_be_bytes(vec),
+                Err(_) => {
+                    return Err(NbdError::InvalidPacket(String::from(
+                        "Failed to convert first 4 bytes of packet to u32",
+                    )));
+                }
+            },
+            None => {
+                return Err(NbdError::InvalidPacket(format!(
+                    "Failed to get first 4 bytes of packet with len : {}",
+                    payload.len()
+                )));
+            }
+        };
 
-        let ts_tx = u32::from_be_bytes(payload[4..8].try_into().unwrap()) as u64;
-        let ts_tx_micros = (ts_tx * 1_000_000
-            + (u32::from_be_bytes(payload[8..12].try_into().unwrap()) as u64))
-            as u128;
+        let ts_tx = match payload.get(4..8) {
+            Some(payload) => u64::from(match <[u8; 4]>::try_from(payload) {
+                Ok(vec) => u32::from_be_bytes(vec),
+                Err(_) => {
+                    return Err(NbdError::InvalidPacket(String::from(
+                        "Failed to convert bytes 4 to 8 of packet to u32",
+                    )));
+                }
+            }),
+            None => {
+                return Err(NbdError::InvalidPacket(format!(
+                    "Failed to get bytes 4 to 8 of packet with len : {}",
+                    payload.len()
+                )));
+            }
+        };
 
-        let ts_rx_micros = ts_rx.duration_since(UNIX_EPOCH).unwrap().as_micros();
+        let ts_tx_micros = u128::from(ts_tx.saturating_mul(1_000_000).saturating_add(
+            match payload.get(8..12) {
+                Some(payload) => u64::from(match <[u8; 4]>::try_from(payload) {
+                    Ok(vec) => u32::from_be_bytes(vec),
+                    Err(_) => {
+                        return Err(NbdError::InvalidPacket(String::from(
+                            "Failed to convert bytes 8 to 12 of packet to u32",
+                        )));
+                    }
+                }),
+                None => {
+                    return Err(NbdError::InvalidPacket(format!(
+                        "Failed to get bytes 8 to 12 of packet with len : {}",
+                        payload.len()
+                    )));
+                }
+            },
+        ));
 
-        if let Ok(mut state) = self.state.lock() {
-            state
-                .latencies
-                .push(Duration::from_micros((ts_rx_micros - ts_tx_micros) as u64));
+        if let Ok(ts_rx_micros) = ts_rx.duration_since(UNIX_EPOCH)
+            && let Ok(mut state) = self.state.lock()
+        {
+            if let Ok(latency) =
+                u64::try_from(match ts_rx_micros.as_micros().checked_sub(ts_tx_micros) {
+                    Some(duration) => duration,
+                    None => {
+                        return Err(NbdError::InvalidPacket(String::from(
+                            "Failed to compute latency based on packet data.",
+                        )));
+                    }
+                })
+            {
+                state.latencies.push(Duration::from_micros(latency));
+            }
             state.indexes.push(pkt_idx);
+        } else {
+            return Err(NbdError::InvalidPacket(String::from(
+                "Failed to determine latency for one packet.",
+            )));
         }
 
         self.received_messages

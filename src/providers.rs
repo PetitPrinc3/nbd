@@ -23,8 +23,9 @@
 //! ## Graceful shutdown
 //!
 //! On [`CancellationToken`](tokio_util::sync::CancellationToken) cancellation, the
-//! listener only exits once all in-flight deliveries have completed, ensuring no
-//! messages are silently dropped.
+//! listener stops reading and only exits once the deliveries already submitted to the sink have
+//! completed or failed. Datagrams that are still waiting in the socket buffer of the operating
+//! system at that moment are not read.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -60,7 +61,9 @@ const BUFFER_RESERVATION_HEADROOM: usize = 100;
 /// 3. Start receiving: [`start_listener()`](Provider::start_listener) — runs the async receive
 ///    loop, dispatching payloads to the given [`MessageSink`].
 pub struct Provider {
+    /// The multicast group this provider listens to.
     pub group: IpAddr,
+    /// `group` as the label of the metrics of this provider (feature `metrics-exporter`).
     #[cfg(feature = "metrics-exporter")]
     pub group_label: Arc<str>,
     topic: Arc<str>,
@@ -104,18 +107,35 @@ impl Provider {
         Ok(())
     }
 
-    /// Get the listening socket
-    pub fn get_socket(&self) -> Result<&Socket, NbdError> {
+    /// Returns the listening socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NbdError::Socket`] when the socket doesn't exist: before
+    /// [`subscribe`](Provider::subscribe), and once [`start_listener`](Provider::start_listener)
+    /// has taken it.
+    pub fn socket(&self) -> Result<&Socket, NbdError> {
         self.socket
             .as_ref()
             .ok_or_else(|| NbdError::Socket(String::from("The socket doesn't exist yet.")))
     }
 
-    /// Subscribe to the provider's multicast group using IGMP join requests on the specified interface.
+    /// Subscribes to the provider's multicast group on the configured interface, with an IGMP join
+    /// for an IPv4 group and an MLD join for an IPv6 group.
+    ///
+    /// Creates the socket, sets the size of its receive buffer to `max_buffer_size` bytes, enables
+    /// address reuse (and port reuse on Unix) and non-blocking mode, binds it to the provider's
+    /// port on all addresses, then joins the group. An interface of the wrong IP family is replaced
+    /// by the default one, with a warning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NbdError::Socket`] when the binding fails, and [`NbdError::Network`] when the
+    /// socket cannot be created or configured, or the group cannot be joined.
     pub fn subscribe(&mut self, max_buffer_size: &usize) -> Result<(), NbdError> {
         self.create_socket(max_buffer_size)?;
 
-        match self.get_socket() {
+        match self.socket() {
             Ok(socket) => {
                 socket.set_reuse_address(true)?;
                 #[cfg(unix)]
@@ -138,29 +158,29 @@ impl Provider {
         match self.group {
             IpAddr::V4(ref maddr_v4) => match self.interface {
                 Interface::V4(ref interface) => {
-                    self.get_socket()?.join_multicast_v4(maddr_v4, interface)?;
+                    self.socket()?.join_multicast_v4(maddr_v4, interface)?;
                 }
                 Interface::V6(ref interface) => {
                     warn!(
                         "An unexpected error occured because the requested interface ({}) is Ipv6 while the requested group is Ipv4 ({}). Defaulting to the default Ipv4 interface (0.0.0.0)",
                         interface, maddr_v4
                     );
-                    self.get_socket()?
+                    self.socket()?
                         .join_multicast_v4(maddr_v4, &Ipv4Addr::UNSPECIFIED)?;
                 }
             },
             IpAddr::V6(ref maddr_v6) => match self.interface {
                 Interface::V6(interface) => {
-                    self.get_socket()?.join_multicast_v6(maddr_v6, interface)?;
-                    self.get_socket()?.set_only_v6(true)?;
+                    self.socket()?.join_multicast_v6(maddr_v6, interface)?;
+                    self.socket()?.set_only_v6(true)?;
                 }
                 Interface::V4(ref interface) => {
                     warn!(
                         "An unexpected error occured because the requested interface ({}) is Ipv4 while the requested group is Ipv6 ({}). Defaulting to the default Ipv6 interface (0)",
                         interface, maddr_v6
                     );
-                    self.get_socket()?.join_multicast_v6(maddr_v6, 0)?;
-                    self.get_socket()?.set_only_v6(true)?;
+                    self.socket()?.join_multicast_v6(maddr_v6, 0)?;
+                    self.socket()?.set_only_v6(true)?;
                 }
             },
         };
@@ -183,7 +203,10 @@ impl Provider {
     ///
     /// # Errors
     ///
-    /// Returns `NbdError::Socket` if the socket has not been created (call [`subscribe`](Provider::subscribe) first).
+    /// Returns [`NbdError::Socket`] if the socket has not been created (call
+    /// [`subscribe`](Provider::subscribe) first), and [`NbdError::Network`] if it cannot be handed
+    /// over to the Tokio runtime. An error while receiving a datagram is not fatal: it is logged and
+    /// counted, and the loop goes on.
     pub async fn start_listener<S: MessageSink>(
         &mut self,
         sink: S,
@@ -198,7 +221,8 @@ impl Provider {
 
         let listener = UdpSocket::from_std(udp_socket)?;
 
-        let mut buf = BytesMut::with_capacity(self.buff_size * BUFFER_RESERVATION_HEADROOM);
+        let mut buf =
+            BytesMut::with_capacity(self.buff_size.saturating_mul(BUFFER_RESERVATION_HEADROOM));
 
         let mut in_flight = FuturesUnordered::new();
 
@@ -241,7 +265,7 @@ impl Provider {
                                 }
 
                                 if buf.capacity() < self.buff_size {
-                                    buf.reserve(self.buff_size * BUFFER_RESERVATION_HEADROOM);
+                                    buf.reserve(self.buff_size.saturating_mul(BUFFER_RESERVATION_HEADROOM));
                                 };
 
                             }

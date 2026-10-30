@@ -1,6 +1,6 @@
 [package]
 name = "nbd"
-version = "0.1.1-beta"
+version = "0.2.0-beta"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["Arthur Reppelin `PetitPrinc3` (arthur.reppelin@gmail.com)"]
@@ -26,6 +26,7 @@ metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"], optional = true }
 futures = "0.3.34"
 secrecy = { version = "0.10.3", features = ["serde"] }
+arc-swap = "1.9.3"
 
 [build-dependencies]
 chrono = "0.4.45"
