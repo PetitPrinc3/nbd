@@ -5,6 +5,8 @@ use std::fmt::{Debug, Display};
 use std::ops::Deref;
 use std::panic::{AssertUnwindSafe, RefUnwindSafe, UnwindSafe};
 
+use secrecy::zeroize::Zeroize;
+
 // Compile-time guarantee: `NbdError` can be shared across threads and can cross a panic boundary
 // (`Send + Sync + UnwindSafe + RefUnwindSafe`). The build fails if a variant ever carries a type
 // that breaks one of these properties. This is why `std::io::Error` and `tokio::task::JoinError`,
@@ -161,5 +163,37 @@ impl<T: Deref> Deref for UnwindShield<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         &self.0.0
+    }
+}
+
+pub(crate) fn parse_toml_error(mut source: String, e: toml::de::Error) -> NbdError {
+    let span = e.span();
+
+    match span {
+        Some(range) if let Some(before) = source.get(..range.start) => {
+            let span = before.split("\n");
+
+            let line = span.clone().count();
+            let col = match span.last() {
+                Some(line) => line.chars().count().saturating_add(1),
+                None => 0,
+            };
+
+            source.zeroize();
+
+            NbdError::Config(format!(
+                "The configuration file is not valid (line {}, column {}) : {}",
+                line,
+                col,
+                e.message()
+            ))
+        }
+        _ => {
+            source.zeroize();
+            NbdError::Config(format!(
+                "The configuration file is not valid : {}",
+                e.message()
+            ))
+        }
     }
 }

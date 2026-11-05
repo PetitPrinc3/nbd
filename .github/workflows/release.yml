@@ -4,89 +4,154 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release target tag.'
-        required: false
-        default: 'v0.1.0-beta'
 
-permissions:
-  contents: write
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  build-linux:
-    name: Build Linux Binaries
-    runs-on: ubuntu-latest
+  verify:
+    name: Verify before release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Check the tag name
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?$'; then
+            echo "Invalid tag name: $TAG"
+            exit 1
+          fi
 
-      - name: Install build dependencies
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install the build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libcurl4-openssl-dev libsasl2-dev cmake
 
-      - name: Build standard binary
-        run: |
-          TAG="${{ inputs.tag || github.ref_name }}"
-          cargo build --release
-          cp target/release/nbd "./nbd_${TAG}"
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
 
-      - name: Build binary with metrics
-        run: |
-          TAG="${{ inputs.tag || github.ref_name }}"
-          cargo build --release --features metrics-exporter
-          cp target/release/nbd "./nbd_${TAG}_with_metrics"
+      - name: Install the audit tools (pinned versions)
+        run: cargo install --locked cargo-audit@0.22.2 cargo-deny@0.20.2 cargo-hack@0.6.45 cargo-vet@0.10.3
 
-      - name: Upload Linux binaries
-        uses: actions/upload-artifact@v4
+      - name: Format
+        run: cargo fmt -- --check
+      - name: Clippy on every feature combination
+        run: cargo hack clippy --locked --feature-powerset --all-targets -- -D warnings
+      - name: Configuration tests
+        run: cargo test --locked --all-features --test config
+      - name: Known vulnerabilities
+        run: cargo audit
+      - name: Licences and sources
+        run: cargo deny check
+      - name: Supply chain
+        run: cargo vet --locked
+
+  build-linux:
+    name: Build the Linux binaries
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install the build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libsasl2-dev cmake
+
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Build
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # The build date is the date of the commit: two builds of the same tag give the same binary.
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          cargo build --locked --release
+          cp target/release/nbd "./nbd-${TAG}-linux-x86_64"
+          cargo build --locked --release --features metrics-exporter
+          cp target/release/nbd "./nbd-${TAG}-linux-x86_64-with-metrics"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: linux-binaries
-          path: |
-            nbd_*
+          path: nbd-*
+          if-no-files-found: error
 
   build-windows:
-    name: Build Windows Binaries
+    name: Build the Windows Binaries
+    needs: verify
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
-      - name: Build standard binary
+      - name: Build
+        env:
+          TAG: ${{ github.ref_name }}
         shell: pwsh
         run: |
-          $tag = if ("${{ inputs.tag }}" -ne "") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
-          cargo build --release
-          Copy-Item target/release/nbd.exe -Destination "./nbd_${tag}.exe"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $env:SOURCE_DATE_EPOCH = git log -1 --format=%ct
+          cargo build --locked --release
+          Copy-Item target/release/nbd.exe -Destination "nbd-$env:TAG-windows.exe"
+          cargo build --locked --release --features metrics-exporter
+          Copy-Item target/release/nbd.exe -Destination "nbd-$env:TAG-windows-with-metrics.exe"
 
-      - name: Build binary with metrics
-        shell: pwsh
-        run: |
-          $tag = if ("${{ inputs.tag }}" -ne "") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
-          cargo build --release --features metrics-exporter
-          Copy-Item target/release/nbd.exe -Destination "./nbd_${tag}_with_metrics.exe"
-
-      - name: Upload Windows binaries
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: windows-binaries
-          path: |
-            nbd_*.exe
+          path: nbd-*
+          if-no-files-found: error
 
-  publish-release:
-    name: Publish GitHub Release
+  publish:
+    name: Publish the release
     needs: [build-linux, build-windows]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write     
+      id-token: write     
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all built binaries
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
+          name: linux-binaries
           path: release-assets
-          merge-multiple: true
 
-      - name: Upload Assets to Existing Release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          files: release-assets/*
+          name: windows-binaries
+          path: release-assets
+
+      - name: Checksums
+        run: |
+          cd release-assets
+          sha256sum nbd-* > SHA256SUMS
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: release-assets/nbd-*
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" release-assets/* --verify-tag --title "$TAG" --notes "See CHANGELOG.md."

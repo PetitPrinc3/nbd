@@ -76,26 +76,46 @@
 use serde::Deserialize;
 
 use secrecy::zeroize::Zeroize;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::{ExposeSecret, SecretBox, SecretString};
 
-use std::cmp;
+use rdkafka::config::ClientConfig;
+
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 #[cfg(feature = "metrics-exporter")]
 use std::io::ErrorKind;
 #[cfg(feature = "metrics-exporter")]
+use std::net::Ipv4Addr;
+#[cfg(feature = "metrics-exporter")]
 use std::net::UdpSocket;
-use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::PathBuf;
 
 use tracing::{debug, error, info, warn};
 
-use crate::errors::NbdError;
+use crate::errors::{NbdError, parse_toml_error};
+
+pub const MAX_UDP_PAYLOAD: usize = 65_527;
+
+/// Headroom multiplier for initial buffer allocation.
+///
+/// The receive buffer is allocated as `message_size * BUFFER_RESERVATION_HEADROOM`
+/// bytes to reduce re-allocation frequency under sustained packet load.
+pub const BUFFER_RESERVATION_HEADROOM: usize = 100;
+
+const MAX_SOCKET_BUFFER: usize = 1 << 30;
+
+const INT_MAX: u32 = 2_147_483_647;
+
+/// Minimum delay, in seconds, between two logged delivery failures for the same topic.
+pub const LOG_THRESHOLD: u64 = 1;
 
 /// Raw, unvalidated configuration deserialized directly from a TOML file.
 ///
 /// All optional fields mirror the TOML structure. Convert to [`Config`] via
 /// `Config::try_from(raw_config)` to obtain validated, defaulted values.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawConfig {
     /// The `[[provider]]` sections, one per multicast stream. At least one is required.
     pub provider: Vec<RawProviderConfig>,
@@ -120,10 +140,15 @@ impl RawConfig {
     ///
     /// - [`NbdError::Config`] when the file cannot be read;
     /// - [`NbdError::Toml`] when its content is not valid.
-    pub fn from_path(path: &PathBuf) -> Result<RawConfig, NbdError> {
+    pub fn from_path(path: &PathBuf, safe_output: bool) -> Result<RawConfig, NbdError> {
         match std::fs::read_to_string(path) {
             Ok(mut content) => {
                 let raw_config = toml::from_str(&content);
+
+                if safe_output && let Err(e) = raw_config {
+                    return Err(parse_toml_error(content, e));
+                }
+
                 content.zeroize();
                 Ok(raw_config?)
             }
@@ -137,6 +162,7 @@ impl RawConfig {
 
 /// Raw `[[provider]]` section from the TOML configuration.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawProviderConfig {
     /// Kafka topic of the stream. Defaults to `nbd-connector`, which also replaces an invalid name.
     pub topic: Option<String>,
@@ -144,8 +170,6 @@ pub struct RawProviderConfig {
     pub group: IpAddr,
     /// UDP port to bind. Unset or `0` is replaced by `20000` plus the index of the provider.
     pub port: Option<u16>,
-    /// Expected maximum datagram size, in bytes. See [`ProviderConfig::message_size`].
-    pub message_size: Option<usize>,
     /// Local interface to join the group on. Defaults to any interface (`0.0.0.0` or `0`).
     pub interface: Option<Interface>,
 }
@@ -177,6 +201,7 @@ pub struct RawProducerConfig {
     /// Maximum number of messages in the producer queue (`queue.buffering.max.messages`).
     /// Default `100000`.
     pub queue_size: Option<u32>,
+    pub queue_weight: Option<u32>,
     /// Maximum number of in-flight requests per connection
     /// (`max.in.flight.requests.per.connection`). Default `5`, which is also the maximum when
     /// idempotence is enabled.
@@ -185,10 +210,12 @@ pub struct RawProducerConfig {
     pub tls: Option<TlsConfig>,
     /// The `[kafka.auth]` section.
     pub auth: Option<RawAuthConfig>,
+    pub allow_insecure_transport: Option<bool>,
 }
 
 /// Raw `[nbd]` section from the TOML configuration.
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RawNbdConfig {
     /// Receive buffer of each multicast socket, in bytes. Default `204800`. `0` is refused.
     pub socket_buffer_size: Option<usize>,
@@ -199,11 +226,13 @@ pub struct RawNbdConfig {
 /// Raw `[metrics]` section from the TOML configuration (requires `metrics-exporter` feature).
 #[cfg(feature = "metrics-exporter")]
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RawMetricsConfig {
-    /// Interface the HTTP listener binds to. Default `127.0.0.1`.
+    /// Interface the HTTP listener binds to.
     pub interface: Option<IpAddr>,
     /// Port of the HTTP listener. Default `9000`.
     pub port: Option<u16>,
+    pub allow_remote_metrics: Option<bool>,
 }
 
 /// Validated, strongly-typed runtime configuration.
@@ -219,13 +248,14 @@ pub struct Config {
     pub nbd: NbdConfig,
     /// The metrics exporter configuration.
     #[cfg(feature = "metrics-exporter")]
-    pub metrics: MetricsConfig,
+    pub metrics: Option<MetricsConfig>,
 }
 
 impl TryFrom<RawConfig> for Config {
     type Error = NbdError;
     fn try_from(raw_config: RawConfig) -> Result<Self, Self::Error> {
         let kafka: ProducerConfig = ProducerConfig::try_from(raw_config.kafka)?;
+
         let nbd: NbdConfig = match raw_config.nbd {
             Some(raw_nbd_config) => NbdConfig::try_from(raw_nbd_config)?,
             None => {
@@ -241,18 +271,39 @@ impl TryFrom<RawConfig> for Config {
             .provider
             .into_iter()
             .enumerate()
-            .map(|(idx, r)| ProviderConfig::try_from_raw(r, idx, nbd.socket_buffer_size))
+            .map(|(idx, r)| ProviderConfig::try_from_raw(r, idx))
             .collect::<Result<Vec<ProviderConfig>, _>>()?;
 
+        if provider.is_empty() {
+            error!("The `provider` section is empty and needs at least one provider.");
+            return Err(NbdError::Config(String::from(
+                "The `provider` section is empty and needs at least one provider.",
+            )));
+        }
+
+        let mut seen: HashSet<(IpAddr, u16)> = HashSet::new();
+        for (idx, p) in provider.iter().enumerate() {
+            if !seen.insert((p.group, p.port)) {
+                error!(
+                    "The `provider.{}` group and port parameters are already used by another provider ({}:{}).",
+                    idx, p.group, p.port
+                );
+                return Err(NbdError::Config(format!(
+                    "Two providers use the same group/port combination ({}:{}).",
+                    p.group, p.port
+                )));
+            }
+        }
+
         #[cfg(feature = "metrics-exporter")]
-        let metrics: MetricsConfig = match raw_config.metrics {
-            Some(raw_metrics_config) => MetricsConfig::try_from(raw_metrics_config)?,
+        let metrics: Option<MetricsConfig> = match raw_config.metrics {
+            Some(raw_metrics_config) => Some(MetricsConfig::try_from(raw_metrics_config)?),
             None => {
                 warn!(
-                    "The `metrics` section is completely missing and was replaced by default values."
+                    "The `metrics` section is not set. Prometheus metrics are disabled."
                 );
 
-                MetricsConfig::try_from(RawMetricsConfig::default())?
+                None
             }
         };
 
@@ -277,10 +328,6 @@ pub struct ProviderConfig {
     pub group: IpAddr,
     /// UDP port to bind.
     pub port: u16,
-    /// Expected maximum datagram size, in bytes. Never `0`, and at most 65,507 (the maximum UDP
-    /// payload). It sizes the receive buffer allocated for this provider, which holds 100 times
-    /// this value.
-    pub message_size: usize,
     /// Local interface the group is joined on, of the same IP family as the group.
     pub interface: Interface,
 }
@@ -289,15 +336,15 @@ impl ProviderConfig {
     fn try_from_raw(
         raw_provider_config: RawProviderConfig,
         idx: usize,
-        socket_buffer_size: usize,
     ) -> Result<ProviderConfig, NbdError> {
         let mut provider_config = ProviderConfig {
             topic: String::new(),
             group: raw_provider_config.group,
             port: 0,
-            message_size: 0,
-            interface: Interface::V4(Ipv4Addr::UNSPECIFIED),
+            interface: Interface(String::from("0")),
         };
+
+        let mut errors: Vec<String> = Vec::new();
 
         if provider_config.group.is_multicast() {
             debug!(
@@ -309,62 +356,50 @@ impl ProviderConfig {
                 "The `providers.{}.group` parameter ({}) is not a valid multicast address.",
                 idx, provider_config.group,
             );
-            return Err(NbdError::Config(format!(
-                "The `providers.{}.group` parameter ({}) is not a valid multicast address.",
-                idx, provider_config.group,
-            )));
+            errors.push(String::from("invalid multicast address"));
         }
 
-        if provider_config.group.is_ipv4() {
-            match raw_provider_config.interface {
-                Some(Interface::V4(interface)) => {
-                    provider_config.interface = Interface::V4(interface);
+        match raw_provider_config.interface {
+            Some(interface) => match interface.index() {
+                Ok(index) => {
+                    if index == 0 {
+                        error!(
+                            "The `provider.{}.interface` is invalid as use of the default interface (0) is forbidden.",
+                            idx
+                        );
+                        errors.push(String::from("forbidden interface value"));
+                    } else {
+                        debug!(
+                            "The `provider.{}.interface` is correctly set to a valid interface.",
+                            idx
+                        );
+
+                        provider_config.interface = interface;
+                    }
                 }
-                Some(Interface::V6(interface)) => {
-                    warn!(
-                        "Impossible use of an Ipv6 interface ({}) for an Ipv4 group ({}). The default interface was used instead (0.0.0.0).",
-                        interface, provider_config.group
+                Err(e) => {
+                    error!(
+                        "The `provider.{}.interface` parameter is invalid : {}",
+                        idx, e
                     );
+                    errors.push(String::from("invalid interface"));
                 }
-                None => {
-                    info!(
-                        "The default Ipv4 interface (0.0.0.0) was used for group {} as none was specified.",
-                        provider_config.group
-                    );
-                }
-            }
-        } else {
-            match raw_provider_config.interface {
-                Some(Interface::V6(interface)) => {
-                    provider_config.interface = Interface::V6(interface);
-                }
-                Some(Interface::V4(interface)) => {
-                    warn!(
-                        "Impossible use of an Ipv4 interface ({}) for an Ipv6 group ({}). The default interface was used instead (0).",
-                        interface, provider_config.group
-                    );
-                    provider_config.interface = Interface::V6(0);
-                }
-                None => {
-                    info!(
-                        "The default Ipv6 interface (0) was used for group {} as none was specified.",
-                        provider_config.group
-                    );
-                    provider_config.interface = Interface::V6(0);
-                }
+            },
+            None => {
+                error!("The `provider.{}.interface` parameter is missing.", idx);
+                errors.push(String::from("missing interface"));
             }
         }
 
         match raw_provider_config.topic {
             Some(topic) => {
-                let mut valid_topic = topic.clone();
-
-                if topic.len() > 254 || topic.is_empty() {
+                if topic.len() > 249 || topic.is_empty() {
                     error!(
-                        "The `providers.{}.topic` parameter's size is invalid as it should be between 1 and 254 chars. It was replaced by a default value of `nbd-connector`.",
+                        "The `providers.{}.topic` parameter's size is invalid as it should be between 1 and 249 chars.",
                         idx
                     );
-                    valid_topic = String::from("nbd-connector");
+
+                    errors.push(String::from("invalid topic length"));
                 } else {
                     debug!("The `providers.{}.topic` parameter has a valid size.", idx);
                 }
@@ -374,50 +409,44 @@ impl ProviderConfig {
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_')
                 {
                     error!(
-                        "The `providers.{}.topic` parameter is invalid as it should only contain alphanumeric characters or '.-_'. It was replaced by a default value of `nbd-connector`.",
+                        "The `providers.{}.topic` parameter is invalid as it should only contain alphanumeric characters or '.-_'.",
                         idx
                     );
-                    valid_topic = String::from("nbd-connector");
+
+                    errors.push(String::from("invalid chars in topic name"));
                 } else {
-                    debug!(
-                        "The `providers.{}.topic` parameter contains only valid characters.",
-                        idx
-                    )
+                    if topic == "." || topic == ".." {
+                        error!(
+                            "The `providers.{}.topic` parameter is invalid as it should only contain alphanumeric characters or '.-_'.",
+                            idx
+                        );
+
+                        errors.push(String::from("invalid chars in topic name"));
+                    } else {
+                        debug!(
+                            "The `providers.{}.topic` parameter contains only valid characters.",
+                            idx
+                        )
+                    }
                 }
 
-                provider_config.topic = valid_topic;
+                provider_config.topic = topic;
             }
             None => {
                 warn!(
-                    "The `providers.{}.topic` parameter is unspecified and was replaced by a default value of `nbd-connector`.",
+                    "The `providers.{}.topic` parameter is missing. It should only contain between one and 249 alphanumeric characters or '.-_'.",
                     idx
                 );
-                provider_config.topic = String::from("nbd-connector");
+
+                errors.push(String::from("missing topic"));
             }
         }
 
         match raw_provider_config.port {
             Some(port) => {
                 if port == 0 {
-                    let default_port: u16 = match u16::try_from(20000_usize.saturating_add(idx)) {
-                        Ok(p) => p,
-                        Err(_) => {
-                            error!(
-                                "The `providers.{}.port` parameter cannot be zero and the software failed to determine a default value.",
-                                &idx
-                            );
-                            Err(NbdError::Config(format!(
-                                "The `providers.{}.port` parameter cannot be zero and the software failed to determine a default value.",
-                                idx
-                            )))
-                        }?,
-                    };
-
-                    warn!(
-                        "The `providers.{}.port` parameter cannot be zero and was replaced by a default value of `{}`.",
-                        &idx, default_port,
-                    );
-                    provider_config.port = default_port;
+                    error!("The `providers.{}.port` parameter cannot be zero.", &idx);
+                    errors.push(String::from("invalid port (0)"));
                 } else if port < 1024 {
                     info!(
                         "While the `providers.{}.port` parameter is specified, using a port lower than 1023 is not recommended (see https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#Well-known_ports)",
@@ -439,84 +468,22 @@ impl ProviderConfig {
                 }
             }
             None => {
-                let default_port: u16 = match u16::try_from(20000_usize.saturating_add(idx)) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        error!(
-                            "The `providers.{}.port` parameter is unspecified and the software failed to determine a default value.",
-                            &idx
-                        );
-                        Err(NbdError::Config(format!(
-                            "The `providers.{}.port` parameter is unspecified and the software failed to determine a default value.",
-                            idx
-                        )))
-                    }?,
-                };
+                error!("The `providers.{}.port` parameter is missing.", &idx);
 
-                warn!(
-                    "The `providers.{}.port` parameter is unspecified and was replaced by a default value of `{}`.",
-                    &idx, default_port,
-                );
-                provider_config.port = default_port;
+                errors.push(String::from("missing port"));
             }
         }
 
-        let default_message_size = cmp::min(1500, socket_buffer_size);
-
-        match raw_provider_config.message_size {
-            Some(mut value) => {
-                let mut is_correct = true;
-
-                if value == 0 {
-                    warn!(
-                        "The `providers.{}.message_size` parameter is unspecified and was replaced by a default value of `{}`.",
-                        &idx, default_message_size,
-                    );
-                    provider_config.message_size = default_message_size;
-                    is_correct = false;
-                } else if value > 65_507 {
-                    warn!(
-                        "The `providers.{}.message_size` parameter is bigger than the maximum UDP datagram size ({} > {}) and was replaced by {}. (see https://en.wikipedia.org/wiki/User_Datagram_Protocol#UDP_datagram_structure)",
-                        &idx, value, 65_507, 65_507,
-                    );
-                    warn!(
-                        "This is most likely a missconfiguration and may cause issues if the total allocated space is bigger than the available memory. A default value of 1 500 is recommended."
-                    );
-                    provider_config.message_size = 65_507;
-                    value = 65_507;
-                    is_correct = false;
-                }
-
-                if value > socket_buffer_size {
-                    warn!(
-                        "The `providers.{}.message_size` parameter is bigger than the `nbd.socket_buffer_size` parameter ({} > {}).",
-                        &idx, value, socket_buffer_size,
-                    );
-                    warn!(
-                        "This is most likely a missconfiguration and will cause data loss when receiving packets longer than the `nbd.socket_buffer_size`."
-                    );
-                    provider_config.message_size = value;
-                    is_correct = false;
-                }
-
-                if is_correct {
-                    debug!(
-                        "The `providers.{}.message_size` parameter is configured correctly.",
-                        &idx,
-                    );
-                    provider_config.message_size = value;
-                };
-            }
-            None => {
-                warn!(
-                    "The `providers.{}.message_size` parameter is unspecified and was replaced by a default value of `{}`.",
-                    &idx, default_message_size,
-                );
-                provider_config.message_size = default_message_size;
-            }
+        if errors.is_empty() {
+            Ok(provider_config)
+        } else {
+            Err(NbdError::Config(format!(
+                "Configuration validation for provider {} failed because of {} errors : {}",
+                idx,
+                errors.len(),
+                errors.join(", "),
+            )))
         }
-
-        Ok(provider_config)
     }
 }
 
@@ -568,6 +535,7 @@ pub struct ProducerConfig {
     pub acks: String,
     /// Maximum number of messages in the producer queue (`queue.buffering.max.messages`).
     pub queue_size: u32,
+    pub queue_weight: u32,
     /// Maximum number of in-flight requests per connection
     /// (`max.in.flight.requests.per.connection`).
     pub parallel_requests: u16,
@@ -578,6 +546,7 @@ pub struct ProducerConfig {
     pub tls: Option<TlsConfig>,
     /// SASL settings. Absent when the connection is not authenticated.
     pub auth: Option<AuthConfig>,
+    pub allow_insecure_transport: bool,
 }
 
 impl ProducerConfig {
@@ -624,14 +593,171 @@ impl ProducerConfig {
     /// The posture holds no secret, only paths and the name of the mechanism, so it can be kept
     /// and logged freely, and it stays valid after [`erase_secrets`](ProducerConfig::erase_secrets).
     pub fn posture(&self) -> SecurityPosture {
-        SecurityPosture {
-            target: self.broker.clone(),
-            tls: self.tls.as_ref().map(SafeTlsConfig::from),
-            sasl: match self.auth {
-                Some(ref a) => Some(a.as_str()),
-                None => None,
-            },
+        let mut posture: BTreeMap<&'static str, String> = BTreeMap::new();
+
+        posture.insert("broker", self.broker.clone());
+        posture.insert("security_protocol", self.security_protocol.clone());
+        posture.insert(
+            "allow_insecure_transport",
+            self.allow_insecure_transport.to_string(),
+        );
+        posture.insert("connection_timeout", self.connection_timeout.to_string());
+        posture.insert("recovery_timeout", self.recovery_timeout.to_string());
+        posture.insert("message_timeout", self.message_timeout.to_string());
+        posture.insert("message_retries", self.message_retries.to_string());
+        posture.insert("compression", self.compression.clone());
+        posture.insert("idempotence", self.idempotence.to_string());
+        posture.insert("linger", self.linger.to_string());
+        posture.insert("acks", self.acks.clone());
+        posture.insert("queue_size", self.queue_size.to_string());
+        posture.insert("queue_weight", self.queue_weight.to_string());
+        posture.insert("parallel_requests", self.parallel_requests.to_string());
+
+        if let Some(ref config) = self.tls {
+            posture.insert("tls.ca_file", config.ca_file.display().to_string());
+            posture.insert(
+                "tls.cert_file",
+                match config.cert_file {
+                    Some(ref path) => path.display().to_string(),
+                    None => String::from(""),
+                },
+            );
+            posture.insert(
+                "tls.key_file",
+                match config.key_file {
+                    Some(ref path) => path.display().to_string(),
+                    None => String::from(""),
+                },
+            );
         }
+
+        if let Some(ref config) = self.auth {
+            posture.insert("auth.mechanism", String::from(config.as_str()));
+
+            match config {
+                AuthConfig::Credentials(_) => {}
+                #[cfg(feature = "kafka-auth-gssapi")]
+                AuthConfig::Kerberos(krb) => {
+                    posture.insert("auth.gssapi.principal", krb.principal.clone());
+                    posture.insert("auth.gssapi.keytab", krb.keytab.display().to_string());
+                    posture.insert("auth.gssapi.service_name", krb.service_name.clone());
+                }
+                #[cfg(feature = "kafka-auth-oauth")]
+                AuthConfig::OAuth(oauth) => {
+                    posture.insert(
+                        "auth.oauth.token_endpoint_url",
+                        oauth.token_endpoint_url.clone(),
+                    );
+                    posture.insert("auth.oauth.client_id", oauth.client_id.clone());
+                    posture.insert(
+                        "auth.oauth.scope",
+                        match oauth.scope {
+                            Some(ref scope) => scope.clone(),
+                            None => String::from(""),
+                        },
+                    );
+                    posture.insert(
+                        "auth.oauth.extensions",
+                        match oauth.extensions {
+                            Some(ref extensions) => extensions.clone(),
+                            None => String::from(""),
+                        },
+                    );
+                }
+            }
+        }
+
+        SecurityPosture { posture }
+    }
+
+    pub fn configure(&self) -> Result<ClientConfig, NbdError> {
+        let mut kafka_config = ClientConfig::new();
+
+        // TLS config application
+        if let Some(ref tls_config) = self.tls {
+            kafka_config.set("ssl.ca.location", tls_config.ca_file.display().to_string());
+
+            if let Some(cert_file) = &tls_config.cert_file {
+                kafka_config.set("ssl.certificate.location", cert_file.display().to_string());
+            }
+
+            if let Some(key_file) = &tls_config.key_file {
+                kafka_config.set("ssl.key.location", key_file.display().to_string());
+            }
+
+            if let Some(key_password) = &tls_config.key_password {
+                let mut secret = key_password.resolve()?;
+                kafka_config.set("ssl.key.password", secret.expose_secret());
+                secret.zeroize();
+            }
+
+            kafka_config.set("enable.ssl.certificate.verification", "true");
+            kafka_config.set("ssl.endpoint.identification.algorithm", "https");
+        };
+
+        // Authentication config application
+        kafka_config.set("security.protocol", self.security_protocol.to_string());
+
+        if let Some(ref auth_config) = self.auth {
+            match auth_config {
+                AuthConfig::Credentials(credentials) => {
+                    kafka_config.set("sasl.mechanism", credentials.mechanism.as_str());
+                    kafka_config.set("sasl.username", credentials.username.expose_secret());
+                    kafka_config.set("sasl.password", credentials.password.expose_secret());
+                }
+                #[cfg(feature = "kafka-auth-gssapi")]
+                AuthConfig::Kerberos(kerberos) => {
+                    kafka_config.set("sasl.mechanism", "GSSAPI");
+                    kafka_config.set("sasl.kerberos.principal", &kerberos.principal);
+                    kafka_config.set(
+                        "sasl.kerberos.keytab",
+                        kerberos.keytab.display().to_string(),
+                    );
+                    kafka_config.set("sasl.kerberos.service.name", &kerberos.service_name);
+                }
+                #[cfg(feature = "kafka-auth-oauth")]
+                AuthConfig::OAuth(oauth) => {
+                    kafka_config.set("sasl.mechanism", "OAUTHBEARER");
+                    kafka_config.set("sasl.oauthbearer.method", "oidc");
+                    kafka_config.set("sasl.oauthbearer.client.id", &oauth.client_id);
+                    let mut secret = oauth.client_secret.resolve()?;
+                    kafka_config.set("sasl.oauthbearer.client.secret", secret.expose_secret());
+                    secret.zeroize();
+                    kafka_config.set(
+                        "sasl.oauthbearer.token.endpoint.url",
+                        &oauth.token_endpoint_url,
+                    );
+                    if let Some(scope) = &oauth.scope {
+                        kafka_config.set("sasl.oauthbearer.scope", scope);
+                    }
+                    if let Some(extensions) = &oauth.extensions {
+                        kafka_config.set("sasl.oauthbearer.extensions", extensions);
+                    }
+                }
+            }
+        };
+
+        kafka_config
+            .set("bootstrap.servers", &self.broker)
+            .set("message.timeout.ms", self.message_timeout.to_string())
+            .set("message.send.max.retries", self.message_retries.to_string())
+            .set("compression.type", self.compression.to_string())
+            .set(
+                "max.in.flight.requests.per.connection",
+                self.parallel_requests.to_string(),
+            )
+            .set("queue.buffering.max.messages", self.queue_size.to_string())
+            .set("queue.buffering.max.kbytes", self.queue_weight.to_string())
+            .set("enable.idempotence", self.idempotence.to_string())
+            .set("linger.ms", self.linger.to_string())
+            .set("acks", self.acks.to_string());
+
+        Ok(kafka_config)
+    }
+
+    pub fn check(&self) -> Result<(), NbdError> {
+        self.configure()?.create_native_config()?;
+        Ok(())
     }
 }
 
@@ -644,16 +770,22 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
             recovery_timeout: 0,
             message_timeout: 0,
             message_retries: 2,
-            compression: String::from("lz4"),
+            compression: String::from("none"),
             idempotence: true,
             linger: 1,
             acks: String::from("all"),
             queue_size: 100000,
+            queue_weight: 100000,
             parallel_requests: 5,
             security_protocol: String::from("plaintext"),
             tls: None,
             auth: None,
+            allow_insecure_transport: raw_producer_config
+                .allow_insecure_transport
+                .unwrap_or(false),
         };
+
+        let mut errors: Vec<String> = Vec::new();
 
         match producer_config.broker.to_socket_addrs() {
             Ok(_) => {
@@ -666,12 +798,19 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
                 warn!(
                     "If you are using a hostname instead of an ip, this error can mean that the specified hostname doesn't resolve."
                 );
+
+                errors.push(String::from("invalid broker"));
             }
         };
 
         match raw_producer_config.connection_timeout {
             Some(value) => {
-                if value < 500 {
+                if value == 0 {
+                    error!(
+                        "The `kafka.connection_timeout` parameter cannot be set to 0. It is recommended to increase it to at least 500ms, depending on your infrastructure and network reliability."
+                    );
+                    errors.push(String::from("invalid connection timeout"));
+                } else if value < 500 {
                     info!(
                         "The `kafka.connection_timeout` parameter is low ({}ms). It is recommended to increase it to at least 500ms, depending on your infrastructure and network reliability.",
                         value
@@ -692,10 +831,8 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
 
         match raw_producer_config.recovery_timeout {
             Some(0) => {
-                warn!(
-                    "The `kafka.recovery_timeout` parameter cannot be `0`. It was replaced by a default value of `600 000`ms (10 mins)."
-                );
-                producer_config.recovery_timeout = 600_000;
+                error!("The `kafka.recovery_timeout` parameter cannot be `0`.");
+                errors.push(String::from("invalid recovery timeout"));
             }
             Some(value) => {
                 if value < 10_000 {
@@ -719,16 +856,26 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
 
         match raw_producer_config.message_timeout {
             Some(value) => {
-                if value < 10 {
-                    info!(
+                if value == 0 {
+                    error!(
+                        "The `kafka.message_timeout` parameter cannot be 0. It is recommended to set the timeout value between 10 and 300 000ms, depending on your infrastructure and network reliability.",
+                    );
+                    errors.push(String::from("invalid message timeout"));
+                } else if value < 10 {
+                    warn!(
                         "The `kafka.message_timeout` parameter is low ({}ms). It is recommended to increase it to at least 10ms, depending on your infrastructure and network reliability.",
                         value
                     );
+                    producer_config.message_timeout = value;
+                } else if value > 300_000 {
+                    error!(
+                        "The `kafka.message_timeout` parameter cannot be greater than 300 000. It is recommended to set the timeout value between 10 and 300 000ms, depending on your infrastructure and network reliability.",
+                    );
+                    errors.push(String::from("invalid message timeout"));
                 } else {
                     debug!("The `kafka.message_timeout` parameter is configured correctly.");
+                    producer_config.message_timeout = value;
                 };
-
-                producer_config.message_timeout = value;
             }
             None => {
                 warn!(
@@ -741,9 +888,10 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
         match raw_producer_config.message_retries {
             Some(value) => {
                 if value < 1 {
-                    warn!(
+                    error!(
                         "The `kafka.message_retries` parameter cannot be 0. It was increased to the default value of `2`."
                     );
+                    errors.push(String::from("invalid message retries"));
                 } else {
                     debug!("The `kafka.message_retries` parameter is configured correctly.");
                     producer_config.message_retries = value;
@@ -762,9 +910,10 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
                     debug!("The `kafka.acks` parameter is configured correctly.");
                     producer_config.acks = value;
                 } else {
-                    warn!(
-                        "The `kafka.acks` parameter is invalid. Possible values are : 'all', '-1', '0' and '1'. It was replaced by a default value of `all`."
+                    error!(
+                        "The `kafka.acks` parameter is invalid. Possible values are : 'all', '-1', '0' and '1'."
                     );
+                    errors.push(String::from("invalid acks value"));
                 }
             }
             None => {
@@ -777,11 +926,11 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
         match raw_producer_config.idempotence {
             Some(value) => {
                 if value && (producer_config.acks != "all" && producer_config.acks != "-1") {
-                    warn!(
-                        "The `kafka.idempotence` parameter is et to true while the acks value is {} which is incompatible. `kafka.idempotence` was automatically set to false.",
+                    error!(
+                        "The `kafka.idempotence` parameter is et to true while the acks value is {} which is incompatible.",
                         producer_config.acks,
                     );
-                    producer_config.idempotence = false;
+                    errors.push(String::from("impossible idempotence/acks combination"));
                 } else {
                     debug!("The `kafka.idempotence` parameter is configured correctly.");
                     producer_config.idempotence = value;
@@ -816,26 +965,37 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
 
         match raw_producer_config.compression {
             Some(value) => {
-                if ["none", "lz4", "gzip", "snappy", "zstd"].contains(&value.as_str()) {
+                if ["none", "lz4", "gzip", "snappy"].contains(&value.as_str()) {
                     debug!("The `kafka.compression` parameter is configured correctly.");
                     producer_config.compression = value;
                 } else {
-                    warn!(
-                        "The `kafka.compression` parameter is invalid. Possible values are : 'none', 'lz4', 'gzip', 'snappy' and 'zstd'. It was replaced by a default value of `lz4`."
+                    error!(
+                        "The `kafka.compression` parameter is invalid. Possible values are : 'none', 'lz4', 'gzip', and 'snappy'."
                     );
+                    errors.push(String::from("invalid compression value"));
                 }
             }
             None => {
                 warn!(
-                    "The `kafka.compression` parameter is unspecified and was replaced by a default value of `lz4`."
+                    "The `kafka.compression` parameter is unspecified and was replaced by a default value of `none`."
                 );
             }
         };
 
         match raw_producer_config.queue_size {
             Some(value) => {
-                debug!("The `kafka.queue_size` parameter is configured correctly.");
-                producer_config.queue_size = value;
+                if value == 0 {
+                    error!("The `kafka.queue_size` parameter cannot be 0.",);
+                    errors.push(String::from("invalid queue size (0)"));
+                } else if value > INT_MAX {
+                    error!(
+                        "The `kafka.queue_size` parameter excedes the maximum value of 2 147 483 647."
+                    );
+                    errors.push(String::from("invalid queue size"));
+                } else {
+                    debug!("The `kafka.queue_size` parameter is configured correctly.");
+                    producer_config.queue_size = value;
+                }
             }
             None => {
                 warn!(
@@ -844,21 +1004,54 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
             }
         };
 
+        match raw_producer_config.queue_weight {
+            Some(value) => {
+                if value == 0 {
+                    error!("The `kafka.queue_weight` parameter cannot be 0.",);
+                    errors.push(String::from("invalid queue weight (0)"));
+                } else if value > INT_MAX {
+                    error!(
+                        "The `kafka.queue_weight` parameter excedes the maximum value of 2 147 483 647."
+                    );
+                    errors.push(String::from("invalid queue size"));
+                } else {
+                    debug!("The `kafka.queue_weight` parameter is configured correctly.");
+                    producer_config.queue_weight = value;
+                }
+            }
+            None => {
+                warn!(
+                    "The `kafka.queue_weight` parameter is unspecified and was replaced by a default value of `100 000`kbytes."
+                );
+            }
+        };
+
         match raw_producer_config.parallel_requests {
             Some(value) => {
                 if producer_config.idempotence {
-                    if value <= 5 {
+                    if (1..=5).contains(&value) {
                         debug!("The `kafka.parallel_requests` parameter is configured correctly.");
                         producer_config.parallel_requests = value;
                     } else {
-                        warn!(
-                            "The `kafka.parallel_requests` parameter is set to {} while idempotence is enabled which requires parallel_requests to be lower than 5. It was replaced by a default value of `5`.",
+                        error!(
+                            "The `kafka.parallel_requests` parameter is set to {} while idempotence is enabled which requires parallel_requests to be set between `1` and `5`.",
                             value
                         );
+                        errors.push(String::from(
+                            "invalid idempotence/parallel_requests combination",
+                        ));
                     }
-                } else {
+                } else if value >= 1 {
                     debug!("The `kafka.parallel_requests` parameter is configured correctly.");
                     producer_config.parallel_requests = value;
+                } else {
+                    error!(
+                        "The `kafka.parallel_requests` parameter is invalid ({}). It needs to be at least `1`.",
+                        value
+                    );
+                    errors.push(String::from(
+                        "invalid idempotence/parallel_requests combination",
+                    ));
                 }
             }
             None => {
@@ -868,25 +1061,35 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
             }
         };
 
+        let mut insecure_transport: bool = false;
+
+        if raw_producer_config
+            .allow_insecure_transport
+            .unwrap_or(false)
+        {
+            warn!("Insecure transport is allowed (insecure TLS).");
+            insecure_transport = true;
+        }
+
         match raw_producer_config.tls {
             #[cfg(not(feature = "kafka-tls"))]
             Some(_tls_config) => {
                 error!(
                     "The `kafka.tls` section is present but this nbd version doesn't support it. Either compile with the `kafka-tls` feature or remove this section from your configuration file."
                 );
-                return Err(NbdError::Config(String::from(
-                    "The `kafka.tls` section is present but this nbd version doesn't support it. Either compile with the `kafka-tls` feature or remove this section from your configuration file.",
-                )));
+
+                errors.push(String::from("missing TLS feature"));
             }
             #[cfg(feature = "kafka-tls")]
             Some(mut tls_config) => {
                 if tls_config.cert_file.is_some() != tls_config.key_file.is_some() {
-                    error!("Incomplete tls certificate/key combination.");
-                    return Err(NbdError::Config(format!(
+                    error!(
                         "Incomplete tls certificate/key combination : key ({}) / cert ({})",
                         tls_config.key_file.is_some(),
                         tls_config.cert_file.is_some()
-                    )));
+                    );
+
+                    errors.push(String::from("incomplete tls certificate/key combination"));
                 }
 
                 if !tls_config.ca_file.is_file() {
@@ -894,42 +1097,38 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
                         "Certificate authority file {} doesn't exist.",
                         tls_config.ca_file.display()
                     );
-                    return Err(NbdError::Config(format!(
-                        "Certificate authority file {} doesn't exist.",
-                        tls_config.ca_file.display()
-                    )));
+
+                    errors.push(String::from("CA file doesn't exist."));
                 }
 
                 if let Some(path) = &tls_config.cert_file
                     && !path.is_file()
                 {
                     error!("Certificate file {} doesn't exist.", path.display());
-                    return Err(NbdError::Config(format!(
-                        "Certificate file {} doesn't exist.",
-                        path.display()
-                    )));
+
+                    errors.push(String::from("certificate file doesn't exist"));
                 }
 
                 if let Some(path) = &tls_config.key_file
                     && !path.is_file()
                 {
                     error!("Key file {} doesn't exist.", path.display());
-                    return Err(NbdError::Config(format!(
-                        "Key file {} doesn't exist.",
-                        path.display()
-                    )));
+
+                    errors.push(String::from("key file doesn't exist"));
                 }
 
-                if let Some(key_password) = tls_config.key_password.as_mut()
-                    && let Ok(key_secret) = key_password.resolve()
-                {
-                    if key_secret.expose_secret().is_empty() {
-                        return Err(NbdError::Config(String::from(
-                            "The `kafka.tls.key_password` parameters cannot be empty.",
-                        )));
+                if let Some(key_password) = tls_config.key_password.as_mut() {
+                    if let Ok(key_secret) = key_password.resolve() {
+                        if key_secret.expose_secret().is_empty() {
+                            error!("The `kafka.tls.key_password` parameter cannot be empty.");
+                            errors.push(String::from("empty key password"));
+                        } else {
+                            key_password.erase();
+                            tls_config.key_password = Some(SecretSource::Literal(key_secret));
+                        }
                     } else {
-                        key_password.erase();
-                        tls_config.key_password = Some(SecretSource::Literal(key_secret));
+                        error!("The `kafka.tls.key_password` parameter failed to resolve.");
+                        errors.push(String::from("key password failed to resolve"));
                     }
                 }
 
@@ -955,7 +1154,8 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
                     Ok(username) => username,
                     Err(e) => {
                         error!("{}", e);
-                        return Err(e);
+                        errors.push(String::from("username failed to resolve"));
+                        SecretString::from("")
                     }
                 };
 
@@ -967,7 +1167,8 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
                     Ok(password) => password,
                     Err(e) => {
                         error!("{}", e);
-                        return Err(e);
+                        errors.push(String::from("password failed to resolve"));
+                        SecretBox::<str>::new("".into())
                     }
                 };
 
@@ -981,9 +1182,10 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
                     resolved_user.zeroize();
                     resolved_pass.zeroize();
 
-                    return Err(NbdError::Config(String::from(
-                        "The `kafka.auth.username` and `kafka.auth.password` parameters cannot be empty.",
-                    )));
+                    error!(
+                        "The `kafka.auth.username` and `kafka.auth.password` parameters cannot be empty."
+                    );
+                    errors.push(String::from("empty username or password"));
                 }
 
                 let mut producer_authconfig = Credentials {
@@ -1011,13 +1213,40 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
 
                 if !value.gssapi.keytab.is_file() {
                     error!(
-                        "Keytab file {} doesn't exist.",
+                        "The keytab file {} doesn't exist.",
                         value.gssapi.keytab.display()
                     );
-                    return Err(NbdError::Config(format!(
-                        "Keytab file {} doesn't exist.",
-                        value.gssapi.keytab.display()
-                    )));
+
+                    errors.push(String::from("keytab file doesn't exist"));
+                } else if !value.gssapi.keytab.is_absolute() {
+                    error!("The keytab file needs to be an absolute path.");
+                    errors.push(String::from("relative path for keytab file"));
+                }
+
+                if value
+                    .gssapi
+                    .keytab
+                    .to_string_lossy()
+                    .contains(['"', '$', '`', '\\', '\n'])
+                {
+                    error!(
+                        "The `kafka.auth.gssapi.keytab` parameter contains invalid characters (`\"`, `$`, ```, `\\`, or a line break)"
+                    );
+                    errors.push(String::from("invalid keyfile path"));
+                }
+
+                if !check_krb_name(&value.gssapi.principal) {
+                    error!(
+                        "The `kafka.auth.gssapi.principal` parameter is invalid as it should only contain alphanumeric characters or `.-_/@` and cannot start with `-`",
+                    );
+                    errors.push(String::from("invalid Kerberos principal"));
+                }
+
+                if !check_krb_name(&value.gssapi.service_name) {
+                    error!(
+                        "The `kafka.auth.gssapi.service_name` parameter is invalid as it should only contain alphanumeric characters or `.-_/@` and cannot start with `-`",
+                    );
+                    errors.push(String::from("invalid service name"));
                 }
 
                 producer_config.auth = Some(AuthConfig::Kerberos(Kerberos {
@@ -1030,22 +1259,39 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
             Some(RawAuthConfig::OAuth(mut value)) => {
                 debug!("The `kafka.auth.oauth` section is configured.");
 
-                if !value.oauth.token_endpoint_url.starts_with("https://") {
-                    warn!(
-                        "The `kafka.auth.oauth.token_endpoint_url` parameter isn't secured (not https). This is not recommended behavior."
-                    );
+                if !value
+                    .oauth
+                    .token_endpoint_url
+                    .to_lowercase()
+                    .starts_with("https://")
+                {
+                    if insecure_transport {
+                        warn!(
+                            "The `kafka.auth.oauth.token_endpoint_url` parameter isn't secured (not https). This is not recommended behavior."
+                        );
+                    } else {
+                        error!(
+                            "The `kafka.auth.oauth.token_endpoint_url` parameter isn't secured (not https). This is forbidden by default (use `allow_insecure_transport = true` to apply anyway)."
+                        );
+                        errors.push(String::from("insecure endpoint (TLS)"));
+                    }
                 }
 
                 if let Ok(client_secret) = value.oauth.client_secret.resolve() {
                     if client_secret.expose_secret().is_empty() || value.oauth.client_id.is_empty()
                     {
-                        return Err(NbdError::Config(String::from(
-                            "The `kafka.auth.oauth.client_id` and `kafka.auth.oauth.client_secret` parameters cannot be empty.",
-                        )));
+                        error!(
+                            "The `kafka.auth.oauth.client_id` and `kafka.auth.oauth.client_secret` parameters cannot be empty."
+                        );
+
+                        errors.push(String::from("empty client_id or client_secret"));
                     } else {
                         value.oauth.client_secret.erase();
                         value.oauth.client_secret = SecretSource::Literal(client_secret);
                     }
+                } else {
+                    error!("The `kafka.auth.oauth.client_secret` parameters is missing.");
+                    errors.push(String::from("missing client_secret"));
                 }
 
                 producer_config.auth = Some(AuthConfig::OAuth(OAuth {
@@ -1068,15 +1314,30 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
             (true, true) => String::from("sasl_ssl"),
             (true, false) => String::from("ssl"),
             (false, true) => {
-                warn!(
-                    "The `kafka.tls` section is not configured while `kafka.auth` is configured. Plaintext secrets could be intercepted on the network. This is not recommended behavior."
-                );
+                if insecure_transport {
+                    warn!(
+                        "The `kafka.tls` section is not configured while `kafka.auth` is configured. Plaintext secrets could be intercepted on the network. This is not recommended behavior."
+                    );
+                } else {
+                    error!(
+                        "The `kafka.auth` section requires the `kafka.tls` section (or `kafka.allow_insecure_transport = true`)"
+                    );
+                    errors.push(String::from("insecure auth protocol"));
+                }
                 String::from("sasl_plaintext")
             }
             (false, false) => String::from("plaintext"),
         };
 
-        Ok(producer_config)
+        if errors.is_empty() {
+            Ok(producer_config)
+        } else {
+            Err(NbdError::Config(format!(
+                "Producer configuration validation failed because of {} errors : {}",
+                errors.len(),
+                errors.join(", "),
+            )))
+        }
     }
 }
 
@@ -1096,6 +1357,8 @@ impl TryFrom<RawNbdConfig> for NbdConfig {
             verbosity: VerbosityLevels::Info,
         };
 
+        let mut errors: Vec<String> = Vec::new();
+
         match raw_nbd_config.socket_buffer_size {
             Some(value) => {
                 if value == 0 {
@@ -1103,14 +1366,18 @@ impl TryFrom<RawNbdConfig> for NbdConfig {
                     warn!(
                         "Please increase the parameter's value to a realistic size based on the expected network traffic (a minimum of 100ko is recommended)."
                     );
-                    return Err(NbdError::Config(format!(
-                        "The submitted nbd.socket_buffer_size ({}) cannot be zero.",
-                        value
-                    )));
+
+                    errors.push(String::from("invalid buffer size (0)"));
                 } else if value < 100 * 1024 {
                     info!(
                         "Your selected socket buffer size seems low. Be advised that the software will silently drop packets as soon as the buffer is filled."
                     );
+                } else if value > MAX_SOCKET_BUFFER {
+                    error!(
+                        "Your selected socket buffer size is too high and should be set between `1` and `{}`o (1 Gio).",
+                        MAX_SOCKET_BUFFER
+                    );
+                    errors.push(String::from("invalid buffer size"));
                 }
 
                 nbd_config.socket_buffer_size = value;
@@ -1135,7 +1402,15 @@ impl TryFrom<RawNbdConfig> for NbdConfig {
             }
         }
 
-        Ok(nbd_config)
+        if errors.is_empty() {
+            Ok(nbd_config)
+        } else {
+            Err(NbdError::Config(format!(
+                "NBD's configuration validation failed because of {} errors : {}",
+                errors.len(),
+                errors.join(", "),
+            )))
+        }
     }
 }
 
@@ -1158,33 +1433,42 @@ impl TryFrom<RawMetricsConfig> for MetricsConfig {
             port: 9000,
         };
 
+        let mut errors: Vec<String> = Vec::new();
+
         match raw_metrics_config.interface {
             Some(interface) => match UdpSocket::bind((interface, 0)) {
                 Ok(_) => {
-                    debug!("The `metrics.interface` parameter is a valid ip address.");
-                    metrics_config.interface = interface;
+                    if interface.is_loopback() {
+                        debug!("The `metrics.interface` parameter is a valid ip address.");
+                        metrics_config.interface = interface;
+                    } else if raw_metrics_config.allow_remote_metrics.unwrap_or(false) {
+                        debug!("The `metrics.interface` parameter is a valid ip address.");
+                        warn!("The metrics are accessible remotely on {}.", interface);
+                        metrics_config.interface = interface;
+                    } else {
+                        error!(
+                            "Impossible use of a remote interface to publish metrics without setting `metrics.allow_remote_metrics` to true."
+                        );
+                        errors.push(String::from("impossible remote interface"));
+                    }
                 }
                 Err(e) => {
                     if e.kind() == ErrorKind::AddrNotAvailable {
-                        warn!(
-                            "The `metrics.interface` parameter doesn't belong to the host's interfaces. It was replaced by the Ipv4 localhost interface (127.0.0.1)."
+                        error!(
+                            "The `metrics.interface` parameter doesn't belong to the host's interfaces."
                         );
                     } else {
                         error!(
                             "An error occured while testing the `metrics.interface` parameter : {}",
                             e
                         );
-                        return Err(NbdError::Config(format!(
-                            "An error occured while testing the `metrics.interface` parameter : {}",
-                            e
-                        )));
                     }
+                    errors.push(String::from("invalid interface"));
                 }
             },
             None => {
-                warn!(
-                    "The `metrics.interface` parameter is not set. It was be replaced by the Ipv4 loopback interface (127.0.0.1)."
-                );
+                error!("The `metrics.interface` parameter is not set.");
+                errors.push(String::from("missing interface"));
             }
         }
 
@@ -1200,7 +1484,15 @@ impl TryFrom<RawMetricsConfig> for MetricsConfig {
             }
         }
 
-        Ok(metrics_config)
+        if errors.is_empty() {
+            Ok(metrics_config)
+        } else {
+            Err(NbdError::Config(format!(
+                "Prometheus metrics configuration validation failed because of {} errors : {}",
+                errors.len(),
+                errors.join(", "),
+            )))
+        }
     }
 }
 
@@ -1243,12 +1535,95 @@ impl fmt::Display for VerbosityLevels {
 /// - [`V4`](Interface::V4) — IPv4 address of the local interface (e.g. `"192.168.1.10"` or `"0.0.0.0"` for any).
 /// - [`V6`](Interface::V6) — IPv6 scope/interface index (e.g. `0` for any, or `2` for a specific NIC).
 #[derive(Deserialize, Clone)]
-#[serde(untagged)]
-pub enum Interface {
-    /// IPv4 address of the local interface.
-    V4(Ipv4Addr),
-    /// IPv6 interface index.
-    V6(u32),
+#[serde(try_from = "String")]
+pub struct Interface(String);
+
+impl TryFrom<String> for Interface {
+    type Error = NbdError;
+    fn try_from(s: String) -> Result<Self, NbdError> {
+        if s.is_empty() {
+            return Err(NbdError::Config(String::from("Empty interface name")));
+        }
+
+        if s.len() > 15
+            || s == "."
+            || s == ".."
+            || !s
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+        {
+            return Err(NbdError::Config(String::from("Invalid interface value.")));
+        }
+
+        if s.parse::<IpAddr>().is_ok() {
+            #[cfg(target_os = "linux")]
+            return Err(NbdError::Config(String::from(
+                "An interface needs to be designated by its name (eg: `eth0`) and not its address.",
+            )));
+            #[cfg(not(target_os = "linux"))]
+            return Err(NbdError::Config(String::from(
+                "An interface needs to be designated by its index (eg: `1`) and not its address.",
+            )));
+        }
+
+        Ok(Interface(s))
+    }
+}
+
+impl Interface {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn index(&self) -> Result<u32, NbdError> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut path = PathBuf::from("/sys/class/net");
+            path.push(&self.0);
+            path.push("ifindex");
+
+            let raw = match std::fs::read_to_string(&path) {
+                Ok(i) => i,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(NbdError::Socket(format!(
+                        "Interface `{}` doesn't exist.",
+                        self.0
+                    )));
+                }
+                Err(_) => {
+                    return Err(NbdError::Socket(format!(
+                        "Unreadable device index for interface `{}`",
+                        self.0
+                    )));
+                }
+            };
+
+            let n: u32 = raw.trim().parse().map_err(|_| {
+                NbdError::Socket(format!("Invalid device index for interface {}", self.0))
+            })?;
+
+            Ok(n)
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let n: u32 = self.0.parse().map_err(|_| {
+                NbdError::Socket(String::from("Failed to parse interface index. On non-linux machines, the interface value needs to be the index of the desired interface."))
+            })?;
+
+            Ok(n)
+        }
+    }
+}
+
+#[cfg(feature = "kafka-auth-gssapi")]
+fn check_krb_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with("-")
+        && name.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '@' || c == '_' || c == '.'
+        })
 }
 
 /// Raw `[kafka.auth]` section from the TOML configuration.
@@ -1310,30 +1685,6 @@ pub struct TlsConfig {
     pub key_file: Option<PathBuf>,
     /// Password of the private key (`ssl.key.password`).
     pub key_password: Option<SecretSource>,
-}
-
-/// The part of a [`TlsConfig`] that holds no secret: the paths of the files.
-///
-/// Only the paths are kept, not the content of the files nor the key password, which is why a
-/// [`SecurityPosture`] cannot tell that a file was replaced by another one at the same path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SafeTlsConfig {
-    /// Path of the CA certificate.
-    pub ca_file: PathBuf,
-    /// Path of the client certificate, if any.
-    pub cert_file: Option<PathBuf>,
-    /// Path of the client private key, if any.
-    pub key_file: Option<PathBuf>,
-}
-
-impl From<&TlsConfig> for SafeTlsConfig {
-    fn from(tls_config: &TlsConfig) -> Self {
-        SafeTlsConfig {
-            ca_file: tls_config.ca_file.clone(),
-            cert_file: tls_config.cert_file.clone(),
-            key_file: tls_config.key_file.clone(),
-        }
-    }
 }
 
 /// Raw SASL username and password, as written in `[kafka.auth]`.
@@ -1443,26 +1794,55 @@ pub struct OAuth {
 }
 
 #[cfg(unix)]
-fn check_file_permissions(path: &std::path::Path) -> Result<(), NbdError> {
+fn check_file_permissions(path: &std::path::Path, is_secret: bool) -> Result<(), NbdError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let mode = std::fs::metadata(path)
-        .map_err(|e| NbdError::Config(format!("Cannot read {} : {e}", path.display())))?
-        .permissions()
-        .mode();
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|e| NbdError::Config(format!("Cannot read {} : {e}", path.display())))?;
 
-    if mode & 0o077 != 0 {
+    if metadata.file_type().is_symlink() {
         return Err(NbdError::Config(format!(
-            "Invalid permissions on {} while containing secrets ({:04o}).",
+            "The use of symbolic links is prohibited for security reasons ({} is a symlink).",
+            path.display(),
+        )));
+    }
+
+    let max_perm = if is_secret { 0o077 } else { 0o022 };
+
+    let mode = metadata.permissions().mode();
+
+    if mode & max_perm != 0 {
+        return Err(NbdError::Config(format!(
+            "Invalid permissions on {} ({:04o}).",
             path.display(),
             mode & 0o777
         )));
     }
+
+    let parent = match path.parent() {
+        Some(folder) if !folder.as_os_str().is_empty() => folder,
+        _ => std::path::Path::new("."),
+    };
+
+    let parent_metadata = std::fs::metadata(parent)
+        .map_err(|e| NbdError::Config(format!("Cannot read {} : {e}", path.display())))?;
+
+    let parent_mode = parent_metadata.permissions().mode();
+
+    if parent_mode & 0o022 != 0 {
+        return Err(NbdError::Config(format!(
+            "Invalid permissions on {} which is the parent folder of {} while containing secrets ({:04o}).",
+            parent.display(),
+            path.display(),
+            parent_mode & 0o777,
+        )));
+    }
+
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn check_file_permissions(path: &std::path::Path) -> Result<(), NbdError> {
+fn check_file_permissions(path: &std::path::Path, _is_secret: bool) -> Result<(), NbdError> {
     warn!(
         "Cannot verify the permissions of {} on this platform. Make sure it is only readable by intended users.",
         path.display()
@@ -1481,31 +1861,33 @@ pub fn check_secrets(
     kafka_config: &RawProducerConfig,
     config_path: &std::path::Path,
 ) -> Result<(), NbdError> {
+    let mut is_secret: bool = false;
+
     match &kafka_config.auth {
         Some(RawAuthConfig::RawCredentials(creds)) => {
             if creds.password.is_literal() {
-                check_file_permissions(config_path)?;
+                is_secret = true;
             }
 
             if let Some(secrets_file) = creds.password.file_path() {
-                check_file_permissions(secrets_file)?;
+                check_file_permissions(secrets_file, true)?;
             }
         }
 
         #[cfg(feature = "kafka-auth-oauth")]
         Some(RawAuthConfig::OAuth(oauth)) => {
             if oauth.oauth.client_secret.is_literal() {
-                check_file_permissions(config_path)?;
+                is_secret = true;
             }
 
             if let Some(secrets_file) = oauth.oauth.client_secret.file_path() {
-                check_file_permissions(secrets_file)?;
+                check_file_permissions(secrets_file, true)?;
             }
         }
 
         #[cfg(feature = "kafka-auth-gssapi")]
         Some(RawAuthConfig::Kerberos(value)) => {
-            check_file_permissions(&value.gssapi.keytab)?;
+            check_file_permissions(&value.gssapi.keytab, true)?;
         }
 
         None => {}
@@ -1515,18 +1897,26 @@ pub fn check_secrets(
     if let Some(ref tls_config) = kafka_config.tls {
         if let Some(key_password) = &tls_config.key_password {
             if key_password.is_literal() {
-                check_file_permissions(config_path)?;
+                is_secret = true;
             }
 
             if let Some(secrets_file) = key_password.file_path() {
-                check_file_permissions(secrets_file)?;
+                check_file_permissions(secrets_file, true)?;
             }
         }
 
+        check_file_permissions(&tls_config.ca_file, false)?;
+
+        if let Some(ref path) = tls_config.cert_file {
+            check_file_permissions(path, false)?;
+        }
+
         if let Some(key_file) = &tls_config.key_file {
-            check_file_permissions(key_file)?;
+            check_file_permissions(key_file, true)?;
         }
     }
+
+    check_file_permissions(config_path, is_secret)?;
 
     Ok(())
 }
@@ -1654,9 +2044,7 @@ impl SecretSource {
 /// - everything else in `[kafka]` (acknowledgements, idempotence, compression, ...).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityPosture {
-    target: String,
-    tls: Option<SafeTlsConfig>,
-    sasl: Option<&'static str>,
+    posture: BTreeMap<&'static str, String>,
 }
 
 impl SecurityPosture {
@@ -1694,95 +2082,28 @@ impl SecurityPosture {
     /// changes can be applied by restarting NBD, since a startup trusts the file and has no
     /// reference to compare with.
     pub fn check_against(&self, candidate: &Self) -> Result<(), NbdError> {
-        let mut errors: Vec<String> = Vec::new();
+        let mut errors: Vec<&str> = Vec::new();
 
-        if self.tls != candidate.tls {
-            if candidate.tls.is_none() {
-                error!("The `kafka.tls` section is missing in the new configuration.");
-                errors.push(String::from("missing `kafka.tls` section"))
-            } else {
-                warn!("The `kafka.tls` configuration was changed in the new configuration.");
+        for setting in self.posture.keys().chain(candidate.posture.keys()) {
+            if self.posture.get(setting) != candidate.posture.get(setting)
+                && !errors.contains(setting)
+            {
+                errors.push(setting);
             }
         }
-
-        if let Some(ref config) = self.tls
-            && let Some(ref candidate_config) = candidate.tls
-        {
-            if config.cert_file.is_some() && candidate_config.cert_file.is_none() {
-                // Note : this doesn't prevent the file itself (its content) from being changed.
-                error!(
-                    "The certificate file for the TLS configuration was removed in the new configuration."
-                );
-                errors.push(String::from("missing certificate file"));
-            }
-
-            if config.key_file.is_some() && candidate_config.key_file.is_none() {
-                // Note : this doesn't prevent the file itself (its content) from being changed.
-                error!(
-                    "The key file for the TLS configuration was removed in the new configuration."
-                );
-                errors.push(String::from("missing key file"));
-            }
-
-            if config.ca_file != candidate_config.ca_file {
-                // Note : this doesn't prevent the file itself (its content) from being changed.
-                error!(
-                    "The CA file for the TLS configuration was changed in the new configuration."
-                );
-                errors.push(String::from("changed ca file"));
-            }
-        }
-
-        if self.mechanism_rank() > candidate.mechanism_rank() {
-            if candidate.mechanism_rank() < 0 {
-                error!("The `kafka.auth` section is missing in the new configuration.");
-                errors.push(String::from("missing `kafka.auth` section"));
-            } else {
-                error!(
-                    "The `kafka.auth` section has a lower security mechanism ({} > {}).",
-                    self.sasl.unwrap_or("NONE"),
-                    candidate.sasl.unwrap_or("NONE")
-                );
-                errors.push(String::from("lower security mechanism"));
-            }
-        } else if self.mechanism_rank() < candidate.mechanism_rank() {
-            warn!(
-                "The `kafka.auth` section has a higher security mechanism ({} < {}).",
-                self.sasl.unwrap_or("NONE"),
-                candidate.sasl.unwrap_or("NONE")
-            )
-        }
-
-        if self.target != candidate.target {
-            warn!(
-                "The `kafka.broker` parameter was changed to {} in the new configuration.",
-                candidate.target
-            );
-        };
 
         match errors.is_empty() {
             true => Ok(()),
             false => {
                 error!(
-                    "Changes in the configuration file were refused. They can be manually re-applied by restarting NBD."
+                    "Changes in the configuration file were refused ({}). They can be manually re-applied by restarting NBD.",
+                    errors.join(", ")
                 );
                 Err(NbdError::Config(format!(
-                    "Configuration file refused for concerns : {}. These changes can be manually re-applied by restarting NBD.",
+                    "Configuration file refused for security concerns : {}. These changes can be manually re-applied by restarting NBD.",
                     errors.join(", "),
                 )))
             }
-        }
-    }
-
-    fn mechanism_rank(&self) -> i16 {
-        match self.sasl {
-            Some("GSSAPI") => 3,
-            Some("OAUTHBEARER") => 3,
-            Some("SCRAM-SHA-512") => 2,
-            Some("SCRAM-SHA-256") => 1,
-            Some("PLAIN") => 0,
-            None => -1,
-            _ => i16::MAX,
         }
     }
 }

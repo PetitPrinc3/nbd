@@ -28,6 +28,7 @@ use rdkafka::producer::FutureRecord;
 
 use arc_swap::ArcSwap;
 
+use crate::config::LOG_THRESHOLD;
 use crate::errors::NbdError;
 
 const UNIX_EPOCH: SystemTime = SystemTime::UNIX_EPOCH;
@@ -43,8 +44,6 @@ static LOG_LOCKS: LazyLock<ArcSwap<HashMap<Arc<str>, Arc<AtomicU64>>>> =
     LazyLock::new(|| ArcSwap::from_pointee(HashMap::new()));
 /// Serializes the insertion of a new topic in [`LOG_LOCKS`].
 static LOG_WRITER: Mutex<()> = Mutex::new(());
-/// Minimum delay, in seconds, between two logged delivery failures for the same topic.
-const LOG_THRESHOLD: u64 = 1;
 
 /// Trait abstracting the non-blocking submission and asynchronous delivery confirmation of a message.
 ///

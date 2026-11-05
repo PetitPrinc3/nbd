@@ -6,32 +6,55 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build-linux:
-
-    runs-on: ubuntu-latest
-
+    name: Build on Linux
+    runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
-    - name: Add build tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libcurl4-openssl-dev libsasl2-dev
-    - name: Format
-      run: cargo fmt -- --check
-    - name: Build
-      run: cargo build --release --all-features
-  
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install the build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libsasl2-dev cmake
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Build
+        run: cargo build --locked --release --all-features
+
+  ferrocene-build:
+    name: Build with Rust 1.95 (compiler of Ferrocene 26.05)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install the build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libsasl2-dev cmake
+      - name: Install Rust 1.95
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Build
+        run: cargo +1.95.0 build --locked --all-features
+
   build-windows:
-
-    runs-on: windows-latest
-
+    name: Build on Windows
+    runs-on: windows-2025
     steps:
-    - uses: actions/checkout@v4
-    - name: Run tests
-      run: cargo test --test config
-    - name: Build
-      run: cargo build --release --features metrics-exporter
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Configuration tests
+        run: cargo test --locked --test config
+      - name: Build
+        run: cargo build --locked --release --features metrics-exporter

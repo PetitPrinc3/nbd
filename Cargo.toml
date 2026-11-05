@@ -13,7 +13,7 @@ categories = ["network-programming", "command-line-utilities"]
 [dependencies]
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "signal", "io-util"] }
 tokio-util = "0.7.19"
-socket2 = "0.6.5"
+socket2 = { version = "0.6.5", features = ["all"] }
 rdkafka = { version = "0.39.0", features = ["cmake-build"] }
 bytes = "1.12.1"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -40,4 +40,4 @@ default = []
 metrics-exporter = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 kafka-tls = ["rdkafka/ssl"]
 kafka-auth-gssapi = ["rdkafka/gssapi"]
-kafka-auth-oauth = ["rdkafka/curl"]
+kafka-auth-oauth = ["rdkafka/curl", "kafka-tls"]

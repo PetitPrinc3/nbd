@@ -42,6 +42,7 @@
 //! If a listener or the supervisor fails, or if a shutdown stage fails, the daemon exits with an
 //! error once the shutdown sequence is over.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -78,18 +79,32 @@ type LogReloadHandle = tracing_subscriber::reload::Handle<EnvFilter, tracing_sub
 /// Initializes the global [`tracing`] subscriber and log reload layer, delegates the
 /// daemon lifecycle execution to [`run`], and formats any fatal [`NbdError`] through
 /// structured logging before returning an appropriate [`ExitCode`](std::process::ExitCode).
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+fn main() -> std::process::ExitCode {
     let (filter_layer, reload_handle) = reload::Layer::new(
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
     );
 
-    tracing_subscriber::registry()
+    if let Err(e) = tracing_subscriber::registry()
         .with(filter_layer)
         .with(fmt::layer().compact())
-        .init();
+        .try_init()
+    {
+        eprintln!("Failed to initialize the logs: {e}");
+        return std::process::ExitCode::FAILURE;
+    };
 
-    match run(reload_handle).await {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            tracing::error!("Failed to initialize runtime : {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    match runtime.block_on(run(reload_handle)) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("{e}");
@@ -119,11 +134,14 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
     }));
 
     if let Some(config_path) = args.check_config_file {
-        let raw_config = RawConfig::from_path(&config_path)?;
+        let raw_config = RawConfig::from_path(&config_path, !std::io::stdout().is_terminal())?;
         check_secrets(&raw_config.kafka, &config_path)?;
 
         let mut config = Config::try_from(raw_config)?;
+
+        let check = config.kafka.check();
         config.kafka.erase_secrets();
+        check?;
 
         info!("The provided configuration file is valid and can be used as-is.");
         return Ok(());
@@ -142,33 +160,35 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
 
     info!("Starting NBD...");
 
-    let raw_config = RawConfig::from_path(&config_path)?;
+    let raw_config = RawConfig::from_path(&config_path, true)?;
     check_secrets(&raw_config.kafka, &config_path)?;
     let mut config = Config::try_from(raw_config)?;
 
     #[cfg(feature = "metrics-exporter")]
-    match PrometheusBuilder::new()
-        .with_http_listener((config.metrics.interface, config.metrics.port))
-        .install()
-    {
-        Ok(_) => {
-            info!(
-                "Prometheus metrics exporter started at http://{}:{}",
-                config.metrics.interface, config.metrics.port,
-            );
-            Ok(())
-        }
-        Err(e) => {
-            error!(
-                "Failed to start Prometheus metrics exporter on http://{}:{} : {}",
-                config.metrics.interface, config.metrics.port, e,
-            );
-            Err(NbdError::Setup(format!(
-                "Failed to start Prometheus metrics exporter on http://{}:{} : {}",
-                config.metrics.interface, config.metrics.port, e,
-            )))
-        }
-    }?;
+    if let Some(config_metrics) = config.metrics {
+        match PrometheusBuilder::new()
+            .with_http_listener((config_metrics.interface, config_metrics.port))
+            .install()
+        {
+            Ok(_) => {
+                info!(
+                    "Prometheus metrics exporter started at http://{}:{}",
+                    config_metrics.interface, config_metrics.port,
+                );
+                Ok(())
+            }
+            Err(e) => {
+                error!(
+                    "Failed to start Prometheus metrics exporter on http://{}:{} : {}",
+                    config_metrics.interface, config_metrics.port, e,
+                );
+                Err(NbdError::Setup(format!(
+                    "Failed to start Prometheus metrics exporter on http://{}:{} : {}",
+                    config_metrics.interface, config_metrics.port, e,
+                )))
+            }
+        }?;
+    }
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(config.nbd.verbosity.to_string()));
@@ -188,7 +208,17 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
 
     let cancel_token = CancellationToken::new();
 
-    let providers: Vec<Provider> = config.provider.iter().map(Provider::from).collect();
+    let mut providers: Vec<Provider> = config.provider.iter().map(Provider::from).collect();
+
+    for provider in providers.iter_mut() {
+        if let Err(e) = provider.create_socket(&config.nbd.socket_buffer_size) {
+            error!(
+                "Failed to create a listener socket for {} : {}",
+                provider.group_label, e
+            );
+            return Err(e);
+        }
+    }
 
     info!(
         "Connecting to the Kafka broker at {} ...",
@@ -246,25 +276,24 @@ async fn run(reload_handle: LogReloadHandle) -> Result<(), NbdError> {
     // The only remaining secrets become the ones stored by librdkafka and required for authentication and reauthentication.
     drop(config.kafka);
 
+    for provider in providers.iter() {
+        if let Err(e) = provider.join() {
+            error!("Failed to join {} : {}", provider.group_label, e);
+            cancel_token.cancel();
+            return Err(e);
+        }
+    }
+
     for mut provider in providers {
         let task_tk = cancel_token.clone();
         let task_producer = producer_manager.clone();
 
         listener_tasks.spawn(async move {
-            match provider.subscribe(&config.nbd.socket_buffer_size) {
-                Ok(()) => match provider.start_listener(task_producer, task_tk).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!(
-                            "Something went wrong while listening to {} : {}",
-                            provider.group, e
-                        );
-                        return Err(e);
-                    }
-                },
+            match provider.start_listener(task_producer, task_tk).await {
+                Ok(_) => {}
                 Err(e) => {
                     error!(
-                        "Something went wrong while subscribing to {} : {}",
+                        "Something went wrong while listening to {} : {}",
                         provider.group, e
                     );
                     return Err(e);

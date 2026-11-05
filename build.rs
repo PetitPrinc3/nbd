@@ -11,13 +11,17 @@
 use chrono::{TimeZone, Utc};
 use std::env;
 
-fn main() {
+fn main() -> Result<(), String> {
     let now = match env::var("SOURCE_DATE_EPOCH") {
-        Ok(val) => {
-            let timestamp = val.parse::<i64>().unwrap_or(0);
-            Utc.timestamp_opt(timestamp, 0).unwrap()
-        }
-        Err(_) => Utc::now(),
+        Ok(val) => match val.parse::<i64>() {
+            Ok(timestamp) => match Utc.timestamp_opt(timestamp, 0).single() {
+                Some(utc) => utc,
+                None => return Err(format!("Failed to convert timestamp {timestamp}")),
+            },
+            Err(e) => return Err(format!("Failed to parse EPOCH as integer : {e}")),
+        },
+        Err(env::VarError::NotPresent) => Utc::now(),
+        Err(e) => return Err(format!("SOURCE_DATE_EPOCH cannot be read : {e}")),
     };
 
     let formatted_date = now.format("%b %d %Y %H:%M:%S").to_string();
@@ -55,4 +59,6 @@ fn main() {
 
     println!("cargo:rustc-env=BUILD_FEATURES={}", features_str);
     println!("cargo:rustc-env=BUILD_VERSION_FULL={}", full_version);
+
+    Ok(())
 }

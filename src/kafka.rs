@@ -60,14 +60,13 @@
 //! metrics, the security considerations and a complete example are documented on
 //! [`ManagedProducer`].
 
-use rdkafka::config::ClientConfig;
 use rdkafka::producer::{FutureProducer, Producer};
 
 use bytes::Bytes;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use std::time::{Duration, Instant};
 
@@ -80,15 +79,10 @@ use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwap;
 
-use secrecy::ExposeSecret;
-use secrecy::zeroize::Zeroize;
-
 use tracing::{debug, error, info, warn};
 
 use crate::sinks::submit_on;
-use crate::{
-    AuthConfig, MessageSink, NbdError, ProducerConfig, RawConfig, SecurityPosture, check_secrets,
-};
+use crate::{MessageSink, NbdError, ProducerConfig, RawConfig, SecurityPosture, check_secrets};
 
 /// Channel feeding the `nbd-kafka-reaper` thread, which destroys retired producers.
 ///
@@ -231,86 +225,8 @@ fn wait_for_reaper(timeout: Duration) -> Result<bool, NbdError> {
 /// unreadable secrets file), and [`NbdError::Kafka`] when `librdkafka` rejects the configuration
 /// or fails to create the client (for instance, unusable TLS material).
 pub fn build_producer(config: &ProducerConfig) -> Result<FutureProducer, NbdError> {
-    let mut kafka_config = ClientConfig::new();
-
-    // TLS config application
-    if let Some(ref tls_config) = config.tls {
-        kafka_config.set("ssl.ca.location", tls_config.ca_file.display().to_string());
-        if let Some(cert_file) = &tls_config.cert_file {
-            kafka_config.set("ssl.certificate.location", cert_file.display().to_string());
-        }
-        if let Some(key_file) = &tls_config.key_file {
-            kafka_config.set("ssl.key.location", key_file.display().to_string());
-        }
-        if let Some(key_password) = &tls_config.key_password {
-            let mut secret = key_password.resolve()?;
-            kafka_config.set("ssl.key.password", secret.expose_secret());
-            secret.zeroize();
-        }
-    };
-
-    // Authentication config application
-    kafka_config.set("security.protocol", config.security_protocol.to_string());
-
-    if let Some(ref auth_config) = config.auth {
-        match auth_config {
-            AuthConfig::Credentials(credentials) => {
-                kafka_config.set("sasl.mechanism", credentials.mechanism.as_str());
-                kafka_config.set("sasl.username", credentials.username.expose_secret());
-                kafka_config.set("sasl.password", credentials.password.expose_secret());
-            }
-            #[cfg(feature = "kafka-auth-gssapi")]
-            AuthConfig::Kerberos(kerberos) => {
-                kafka_config.set("sasl.mechanism", "GSSAPI");
-                kafka_config.set("sasl.kerberos.principal", &kerberos.principal);
-                kafka_config.set(
-                    "sasl.kerberos.keytab",
-                    kerberos.keytab.display().to_string(),
-                );
-                kafka_config.set("sasl.kerberos.service.name", &kerberos.service_name);
-            }
-            #[cfg(feature = "kafka-auth-oauth")]
-            AuthConfig::OAuth(oauth) => {
-                kafka_config.set("sasl.mechanism", "OAUTHBEARER");
-                kafka_config.set("sasl.oauthbearer.method", "oidc");
-                kafka_config.set("sasl.oauthbearer.client.id", &oauth.client_id);
-                let mut secret = oauth.client_secret.resolve()?;
-                kafka_config.set("sasl.oauthbearer.client.secret", secret.expose_secret());
-                secret.zeroize();
-                kafka_config.set(
-                    "sasl.oauthbearer.token.endpoint.url",
-                    &oauth.token_endpoint_url,
-                );
-                if let Some(scope) = &oauth.scope {
-                    kafka_config.set("sasl.oauthbearer.scope", scope);
-                }
-                if let Some(extensions) = &oauth.extensions {
-                    kafka_config.set("sasl.oauthbearer.extensions", extensions);
-                }
-            }
-        }
-    };
-
-    Ok(kafka_config
-        .set("bootstrap.servers", &config.broker)
-        .set("message.timeout.ms", config.message_timeout.to_string())
-        .set(
-            "message.send.max.retries",
-            config.message_retries.to_string(),
-        )
-        .set("compression.type", config.compression.to_string())
-        .set(
-            "max.in.flight.requests.per.connection",
-            config.parallel_requests.to_string(),
-        )
-        .set(
-            "queue.buffering.max.messages",
-            config.queue_size.to_string(),
-        )
-        .set("enable.idempotence", config.idempotence.to_string())
-        .set("linger.ms", config.linger.to_string())
-        .set("acks", config.acks.to_string())
-        .create::<rdkafka::producer::FutureProducer>()?)
+    let client = config.configure()?;
+    Ok(client.create::<FutureProducer>()?)
 }
 
 /// One generation of the `librdkafka` producer held by a [`ManagedProducer`].
@@ -865,57 +781,8 @@ pub type ProducerFactory = Arc<dyn Fn() -> Result<FutureProducer, NbdError> + Se
 /// The message for an invalid TOML file gives the line and column but does not repeat the
 /// offending text, which could contain a secret literal.
 pub fn producer_factory(config_path: PathBuf, posture: SecurityPosture) -> ProducerFactory {
-    let current_posture = Mutex::new(posture);
-
     Arc::new(move || {
-        let raw_config = match std::fs::read_to_string(&config_path) {
-            Ok(mut content) => match toml::from_str::<RawConfig>(&content) {
-                Ok(config) => {
-                    content.zeroize();
-                    config
-                }
-                Err(e) => {
-                    let span = e.span();
-
-                    match span {
-                        Some(range) if let Some(before) = content.get(..range.start) => {
-                            let span = before.split("\n");
-
-                            let line = span.clone().count();
-                            let col = match span.last() {
-                                Some(line) => line.chars().count().saturating_add(1),
-                                None => 0,
-                            };
-
-                            content.zeroize();
-
-                            return Err(NbdError::Config(format!(
-                                "The configuration file under {} is no longer valid (line {}, column {}). Run `nbd --check-config-file {}` to see the details.",
-                                config_path.display(),
-                                line,
-                                col,
-                                config_path.display(),
-                            )));
-                        }
-                        _ => {
-                            content.zeroize();
-                            return Err(NbdError::Config(format!(
-                                "The configuration file under {} is no longer valid. Run `nbd --check-config-file {}` to see the details.",
-                                config_path.display(),
-                                config_path.display(),
-                            )));
-                        }
-                    }
-                }
-            },
-            Err(e) => {
-                return Err(NbdError::Config(format!(
-                    "Failed to read the configuration file under {} : {}",
-                    config_path.display(),
-                    e
-                )));
-            }
-        };
+        let raw_config = RawConfig::from_path(&config_path, true)?;
 
         check_secrets(&raw_config.kafka, &config_path)?;
 
@@ -924,9 +791,7 @@ pub fn producer_factory(config_path: PathBuf, posture: SecurityPosture) -> Produ
             || ProducerConfig::try_from(raw_config.kafka),
         )?;
 
-        let mut current = current_posture.lock().unwrap_or_else(|e| e.into_inner());
-
-        if let Err(e) = current.check_against(&config.posture()) {
+        if let Err(e) = posture.check_against(&config.posture()) {
             config.erase_secrets();
             return Err(e);
         }
@@ -934,10 +799,6 @@ pub fn producer_factory(config_path: PathBuf, posture: SecurityPosture) -> Produ
         let producer = build_producer(&config);
 
         config.erase_secrets();
-
-        if producer.is_ok() {
-            *current = config.posture();
-        }
 
         producer
     })
