@@ -1,9 +1,9 @@
-use nbd::{
-    Config, Credentials, RawConfig, RawCredentials, SecretSource, SecurityMechanism, check_secrets,
-};
+use nbd::{Config, Credentials, RawConfig, RawCredentials, SecretSource, SecurityMechanism};
 use secrecy::{ExposeSecret, SecretString};
 use std::io::Write;
 
+#[cfg(unix)]
+use nbd::check_secrets;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -196,8 +196,7 @@ parallel_requests = 5
 topic = "nbd-canary"
 group = "230.0.0.1"
 port = 20000
-message_size = 2048
-interface = "0.0.0.0"
+interface = "lo"
     "#;
 
     let valid_raw_conf_example = toml::from_str::<RawConfig>(valid_raw_toml_example);
@@ -211,7 +210,9 @@ interface = "0.0.0.0"
 #[test]
 #[cfg(feature = "kafka-tls")]
 fn test_tls_config_validity() {
-    let temp_dir = std::env::temp_dir();
+    let mut temp_dir = std::env::temp_dir();
+    temp_dir.push(format!("nbd_tls_config_test_{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
 
     let secrets_file = temp_dir.as_path().join("nbd_canary_test_tls_secrets.txt");
     let mut source_file = std::fs::File::create(&secrets_file).unwrap();
@@ -245,8 +246,7 @@ key_password = "some_fake_password"
 topic = "nbd-canary"
 group = "230.0.0.1"
 port = 20000
-message_size = 2048
-interface = "0.0.0.0"
+interface = "lo"
     "#,
         secrets_file.display(),
         secrets_file.display(),
@@ -262,6 +262,8 @@ interface = "0.0.0.0"
 
     #[cfg(unix)]
     {
+        std::fs::set_permissions(&temp_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
         std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::set_permissions(&conf_file, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
@@ -293,7 +295,9 @@ interface = "0.0.0.0"
 /// This test tests the correct handling of auth configurations for the kafka client.
 #[test]
 fn test_auth_config_validity() {
-    let temp_dir = std::env::temp_dir();
+    let mut temp_dir = std::env::temp_dir();
+    temp_dir.push(format!("nbd_auth_config_test_{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
 
     let secrets_file = temp_dir.as_path().join("nbd_canary_test_auth_secrets.txt");
     let mut source_file = std::fs::File::create(&secrets_file).unwrap();
@@ -316,6 +320,7 @@ linger = 1
 acks = "all"
 queue_size = 1000
 parallel_requests = 5
+allow_insecure_transport = true
 
 [kafka.auth]
 username = "Dwight"
@@ -326,8 +331,7 @@ mechanism = "PLAIN"
 topic = "nbd-canary"
 group = "230.0.0.1"
 port = 20000
-message_size = 2048
-interface = "0.0.0.0"
+interface = "lo"
     "#,
         secrets_file.display()
     );
@@ -342,6 +346,8 @@ interface = "0.0.0.0"
 
     #[cfg(unix)]
     {
+        std::fs::set_permissions(&temp_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
         std::fs::set_permissions(&secrets_file, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::set_permissions(&conf_file, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(check_secrets(&valid_raw_conf_example.as_ref().unwrap().kafka, &conf_file).is_ok());
@@ -361,17 +367,24 @@ interface = "0.0.0.0"
     }
 
     let valid_conf_example = Config::try_from(valid_raw_conf_example.unwrap());
+
     assert!(valid_conf_example.is_ok());
     assert!(valid_conf_example.unwrap().kafka.auth.is_some());
 
     std::fs::remove_file(&conf_file).unwrap();
     std::fs::remove_file(&secrets_file).unwrap();
+    std::fs::remove_dir_all(&temp_dir).unwrap();
 }
 
 /// This test tests the correct handling of auth configurations for the kafka client.
 #[test]
 fn test_auth_config_invalidity() {
-    let temp_dir = std::env::temp_dir();
+    let mut temp_dir = std::env::temp_dir();
+    temp_dir.push(format!(
+        "nbd_broken_auth_config_test_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
 
     let conf_file = temp_dir.as_path().join("nbd_canary_test_invalid_conf.txt");
     let mut source_file = std::fs::File::create(&conf_file).unwrap();
@@ -393,6 +406,7 @@ linger = 1
 acks = "all"
 queue_size = 1000
 parallel_requests = 5
+allow_insecure_transport = true
 
 [kafka.auth]
 username = "Dwight"
@@ -408,8 +422,7 @@ service_name: "paper_sale"
 topic = "nbd-canary"
 group = "230.0.0.1"
 port = 20000
-message_size = 2048
-interface = "0.0.0.0"
+interface = "lo"
     "#,
         conf_file.display()
     );
@@ -436,6 +449,7 @@ linger = 1
 acks = "all"
 queue_size = 1000
 parallel_requests = 5
+allow_insecure_transport = true
 
 [kafka.auth.oauth]
 token_endpoint_url = "https://dunder-mifflin.com/auth"
@@ -451,8 +465,7 @@ service_name: "paper_sale"
 topic = "nbd-canary"
 group = "230.0.0.1"
 port = 20000
-message_size = 2048
-interface = "0.0.0.0"
+interface = "lo"
     "#,
         conf_file.display()
     );
@@ -478,6 +491,7 @@ linger = 1
 acks = "all"
 queue_size = 1000
 parallel_requests = 5
+allow_insecure_transport = true
 
 [kafka.auth]
 username = "Dwight"
@@ -493,8 +507,7 @@ client_secret = "cece"
 topic = "nbd-canary"
 group = "230.0.0.1"
 port = 20000
-message_size = 2048
-interface = "0.0.0.0"
+interface = "lo"
     "#;
 
     writeln!(source_file, "{}", invalid_raw_toml_example).unwrap();
@@ -503,4 +516,5 @@ interface = "0.0.0.0"
     assert!(!invalid_raw_conf_example.is_ok());
 
     std::fs::remove_file(&conf_file).unwrap();
+    std::fs::remove_dir_all(&temp_dir).unwrap();
 }

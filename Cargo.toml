@@ -1,6 +1,6 @@
 [package]
 name = "nbd"
-version = "0.1.1-beta"
+version = "0.2.0-beta"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["Arthur Reppelin `PetitPrinc3` (arthur.reppelin@gmail.com)"]
@@ -13,7 +13,7 @@ categories = ["network-programming", "command-line-utilities"]
 [dependencies]
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "signal", "io-util"] }
 tokio-util = "0.7.19"
-socket2 = "0.6.5"
+socket2 = { version = "0.6.5", features = ["all"] }
 rdkafka = { version = "0.39.0", features = ["cmake-build"] }
 bytes = "1.12.1"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -26,6 +26,7 @@ metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"], optional = true }
 futures = "0.3.34"
 secrecy = { version = "0.10.3", features = ["serde"] }
+arc-swap = "1.9.3"
 
 [build-dependencies]
 chrono = "0.4.45"
@@ -39,4 +40,4 @@ default = []
 metrics-exporter = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 kafka-tls = ["rdkafka/ssl"]
 kafka-auth-gssapi = ["rdkafka/gssapi"]
-kafka-auth-oauth = ["rdkafka/curl"]
+kafka-auth-oauth = ["rdkafka/curl", "kafka-tls"]

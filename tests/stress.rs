@@ -1,9 +1,9 @@
 mod commons;
-#[cfg(windows)]
-use commons::NtSetTimerResolution;
+//#[cfg(windows)]
+//use commons::NtSetTimerResolution;
 use commons::show_report;
 
-use nbd::{BenchSink, Interface, Provider, ProviderConfig};
+use nbd::{BenchSink, Provider, ProviderConfig};
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,8 +12,8 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(windows)]
-const WINDOWS_TIMER_TESTING_RESOLUTION_MS: f32 = 0.005;
+//#[cfg(windows)]
+//const WINDOWS_TIMER_TESTING_RESOLUTION_MS: f32 = 0.005;
 
 const STRESS_TEST_DURATION_SECONDS: u64 = 5 * 60;
 const STRESS_TEST_FRQ_MICROS: u64 = 1000;
@@ -29,37 +29,36 @@ async fn stress_test() {
 
     let mut tx_count = AtomicU64::new(0);
 
-    #[cfg(windows)]
-    let mut timer_resolution_change = false;
+    //#[cfg(windows)]
+    //let mut timer_resolution_change = false;
 
-    #[cfg(windows)]
-    let mut actual_100ns = 0;
+    //#[cfg(windows)]
+    //let mut actual_100ns = 0;
 
-    #[cfg(windows)]
-    unsafe {
-        let res = NtSetTimerResolution(
-            (WINDOWS_TIMER_TESTING_RESOLUTION_MS * 10_000.0) as u32,
-            1,
-            &mut actual_100ns,
-        );
-
-        if res == 0 {
-            println!(
-                "Successfully reduced Windows' timer resolution to {} ms.",
-                (actual_100ns as f32) / 10_000.0
-            );
-            timer_resolution_change = true;
-        } else {
-            println!("Failed to reduce Windows' timer resolution. Default is at 15,6ms.");
-        }
-    }
+    //#[cfg(windows)]
+    //unsafe {
+    //    let res = NtSetTimerResolution(
+    //        (WINDOWS_TIMER_TESTING_RESOLUTION_MS * 10_000.0) as u32,
+    //        1,
+    //        &mut actual_100ns,
+    //    );
+    //
+    //    if res == 0 {
+    //        println!(
+    //            "Successfully reduced Windows' timer resolution to {} ms.",
+    //            (actual_100ns as f32) / 10_000.0
+    //        );
+    //        timer_resolution_change = true;
+    //    } else {
+    //        println!("Failed to reduce Windows' timer resolution. Default is at 15,6ms.");
+    //    }
+    //}
 
     let config_test = ProviderConfig {
         topic: "test".to_string(),
         group: "239.255.0.1".parse().unwrap(),
         port: 0,
-        message_size: 2048,
-        interface: Interface::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        interface: commons::test_interface(),
     };
 
     let mut provider = Provider::from(&config_test);
@@ -69,7 +68,7 @@ async fn stress_test() {
     let listener_token = token.clone();
     let test_sink = BenchSink::default();
 
-    let port = match provider.get_socket() {
+    let port = match provider.socket() {
         Ok(socket) => match socket.local_addr() {
             Ok(sockaddr) => match sockaddr.as_socket() {
                 Some(socketaddr) => socketaddr.port(),
@@ -147,14 +146,14 @@ async fn stress_test() {
         total_received_bytes / STRESS_TEST_DURATION_SECONDS
     );
 
-    #[cfg(windows)]
-    unsafe {
-        if timer_resolution_change {
-            if NtSetTimerResolution(5_000, 0, &mut actual_100ns) == 0 {
-                println!("Successfully restored Windows' timer resolution.");
-            } else {
-                println!("Failed to restore Windows' timer resolution.");
-            }
-        };
-    }
+    //#[cfg(windows)]
+    //unsafe {
+    //    if timer_resolution_change {
+    //        if NtSetTimerResolution(5_000, 0, &mut actual_100ns) == 0 {
+    //            println!("Successfully restored Windows' timer resolution.");
+    //        } else {
+    //            println!("Failed to restore Windows' timer resolution.");
+    //        }
+    //    };
+    //}
 }

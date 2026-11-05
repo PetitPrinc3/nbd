@@ -1,6 +1,8 @@
 use std::cmp;
 use std::time::Duration;
 
+use nbd::Interface;
+
 #[allow(dead_code)]
 pub fn percentile(latencies: &mut [Duration], p: f64) -> Duration {
     if latencies.is_empty() {
@@ -74,12 +76,19 @@ pub fn show_report(
     }
 }
 
-#[cfg(windows)]
-#[link(name = "ntdll")]
-unsafe extern "system" {
-    pub fn NtSetTimerResolution(
-        DesiredResolution: u32,
-        SetResolution: u8,
-        ActualResolution: *mut u32,
-    ) -> i32; // NTSTATUS (0 = STATUS_SUCCESS)
+#[allow(dead_code)]
+pub fn test_interface() -> Interface {
+    let default = if cfg!(target_os = "linux") { "lo" } else { "1" };
+    let name = std::env::var("NBD_TEST_INTERFACE").unwrap_or_else(|_| default.to_string());
+    Interface::try_from(name).expect("invalid test interface")
 }
+
+//#[cfg(windows)]
+//#[link(name = "ntdll")]
+//unsafe extern "system" {
+//    pub fn NtSetTimerResolution(
+//        DesiredResolution: u32,
+//        SetResolution: u8,
+//        ActualResolution: *mut u32,
+//    ) -> i32; // NTSTATUS (0 = STATUS_SUCCESS)
+//}
