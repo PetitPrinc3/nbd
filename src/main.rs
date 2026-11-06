@@ -17,25 +17,31 @@
 //! 1. Initialize dynamic log filtering via `tracing_subscriber::reload`: `info`, or the level of
 //!    the `RUST_LOG` environment variable
 //! 2. Parse CLI arguments ([`Cli`]). `--about` prints the build information and exits;
-//!    `--check-config-file` runs steps 3 and 4 on the given file and exits; without
-//!    `--config-file`, the configuration file is `./config.toml`, with an error log
+//!    `--check-config-file` runs steps 3 and 4 on the given file, submits the settings to
+//!    `librdkafka` without creating a client ([`check`](nbd::ProducerConfig::check)), erases the
+//!    secrets and exits; without `--config-file`, the configuration file is `./config.toml`, with
+//!    an error log
 //! 3. Install a custom panic hook that routes panics to structured `tracing::error!` logs
-//! 4. Parse and validate the TOML configuration ([`RawConfig`] → [`Config`]), after the permission
-//!    checks of the files that carry secrets ([`check_secrets`])
+//! 4. Parse the TOML configuration ([`RawConfig`]), check the permissions of its files
+//!    ([`check_secrets`]), then validate it ([`Config`])
 //! 5. Start the optional Prometheus metrics exporter (feature-gated), then apply the `verbosity` of
 //!    the configuration to the log filter (`RUST_LOG`, when set, takes precedence)
-//! 6. Create the Kafka producer ([`build_producer`]), erase the secrets of the configuration
+//! 6. Create the socket of each provider ([`Provider::create_socket`]), which fails if the kernel
+//!    grants a smaller receive buffer than configured
+//! 7. Create the Kafka producer ([`build_producer`]), erase the secrets of the configuration
 //!    (`ProducerConfig::erase_secrets`) whatever the outcome, and run a pre-flight broker
 //!    connectivity check via `fetch_metadata`
-//! 7. Wrap the producer in a [`ManagedProducer`] and spawn its supervisor, which recreates the
+//! 8. Wrap the producer in a [`ManagedProducer`] and spawn its supervisor, which recreates the
 //!    producer after a fatal error (see [`RecoveryPolicy`]). The [`SecurityPosture`](nbd::SecurityPosture) of the
-//!    configuration is handed to [`producer_factory`], so that a later rebuild cannot weaken the
-//!    connection, and the configuration is then dropped
-//! 8. Spawn one async listener task per provider in a [`JoinSet`]
-//! 9. Monitor signals (Ctrl+C, SIGTERM on Unix) and the health of the listeners and of the
-//!    supervisor for graceful shutdown
-//! 10. Shut down in order, each stage bounded by a 5-second timeout: drain the listeners via
-//!     [`task_termination`], stop the supervisor, then close the managed producer
+//!    configuration is handed to [`producer_factory`], so that a later rebuild cannot change it,
+//!    and the configuration is then dropped
+//! 9. Join the multicast groups ([`Provider::join`]) and spawn one async listener task per provider
+//!    in a [`JoinSet`]
+//! 10. Monitor signals (Ctrl+C, SIGTERM on Unix) and the health of the listeners and of the
+//!     supervisor for graceful shutdown
+//! 11. Shut down: one cancellation token stops the listeners and the supervisor together. The
+//!     daemon then waits, each stage bounded by a 5-second timeout, for the listeners to drain
+//!     ([`task_termination`]), for the supervisor, and for the managed producer to be closed
 //!     ([`ManagedProducer::close`]), which waits for it to be released and destroyed (at most
 //!     twice that timeout)
 //!

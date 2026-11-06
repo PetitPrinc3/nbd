@@ -57,6 +57,10 @@ pub enum NbdError {
     Network(#[source] UnwindShield<std::io::Error>),
 
     /// TOML deserialization error from the configuration file.
+    ///
+    /// Its message shows the offending line of the file. It is only returned by
+    /// [`RawConfig::from_path`](crate::RawConfig::from_path) without `safe_output`: with it, the
+    /// error is reported as a [`Config`](NbdError::Config) that omits the text of the file.
     #[error("Invalid TOML configuration: {0}")]
     Toml(#[from] toml::de::Error),
 
@@ -166,6 +170,12 @@ impl<T: Deref> Deref for UnwindShield<T> {
     }
 }
 
+/// Turns a TOML error into an [`NbdError::Config`] that gives the line, the column and the message
+/// of the error, without the text of the file, which could hold a literal secret, and zeroizes
+/// `source`.
+///
+/// Two limits: the message of a type error quotes the value it refused, and `e` holds its own copy
+/// of the text, which is released without being zeroized.
 pub(crate) fn parse_toml_error(mut source: String, e: toml::de::Error) -> NbdError {
     let span = e.span();
 

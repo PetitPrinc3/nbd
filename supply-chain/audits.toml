@@ -104,14 +104,14 @@ criteria = "safe-to-deploy"
 user-id = 55123 # rust-lang-owner
 start = "2022-10-29"
 end = "2027-11-01"
-notes = "Publisher already trusted by  (imported audits). Decision to be confirmed by the NBD maintainer."
+notes = "Publisher already trusted by  (imported audits)."
 
 [[trusted.cfg-if]]
 criteria = "safe-to-deploy"
 user-id = 55123 # rust-lang-owner
 start = "2025-06-09"
 end = "2027-11-01"
-notes = "Publisher already trusted by  (imported audits). Decision to be confirmed by the NBD maintainer."
+notes = "Publisher already trusted by  (imported audits)."
 
 [[trusted.clap]]
 criteria = "safe-to-deploy"
@@ -146,7 +146,7 @@ criteria = "safe-to-deploy"
 user-id = 55123 # rust-lang-owner
 start = "2022-10-29"
 end = "2027-11-01"
-notes = "Publisher already trusted by  (imported audits). Decision to be confirmed by the NBD maintainer."
+notes = "Publisher already trusted by  (imported audits)."
 
 [[trusted.colorchoice]]
 criteria = "safe-to-deploy"
@@ -265,14 +265,14 @@ criteria = "safe-to-deploy"
 user-id = 55123 # rust-lang-owner
 start = "2026-10-01"
 end = "2027-11-01"
-notes = "Publisher already trusted by  (imported audits). Decision to be confirmed by the NBD maintainer."
+notes = "Publisher already trusted by  (imported audits)."
 
 [[trusted.libc]]
 criteria = "safe-to-deploy"
 user-id = 55123 # rust-lang-owner
 start = "2024-08-15"
 end = "2027-11-01"
-notes = "Publisher already trusted by  (imported audits). Decision to be confirmed by the NBD maintainer."
+notes = "Publisher already trusted by  (imported audits)."
 
 [[trusted.loom]]
 criteria = "safe-to-deploy"

@@ -15,7 +15,7 @@ const ORANGE: &str = "\x1B[38;2;247;76;0m";
 /// Build-time metadata is injected by `build.rs` and Cargo:
 /// `BUILD_DATE`, `BUILD_ARCH`, `CARGO_PKG_NAME`, `CARGO_PKG_VERSION`,
 /// `CARGO_PKG_AUTHORS`, `CARGO_PKG_DESCRIPTION`, `CARGO_PKG_REPOSITORY`.
-/// Enabled features are indicated at build time via via cfg!().
+/// The enabled Cargo features come from `BUILD_FEATURES`, also injected by `build.rs`.
 pub fn about() {
     let build_date = env!("BUILD_DATE");
     let build_arch = env!("BUILD_ARCH");

@@ -132,6 +132,8 @@ async fn stress_test() {
         .try_into()
         .unwrap();
 
+    assert_ne!(total_received_bytes, 0);
+
     show_report(
         &format!("{}-seconds-stress-test", STRESS_TEST_DURATION_SECONDS),
         test_sink.latencies.lock().unwrap().to_vec(),

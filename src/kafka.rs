@@ -19,13 +19,12 @@
 //!   task for the whole life of the daemon.
 //! - [`producer_factory`] builds the factory the supervisor calls to obtain a new producer. It
 //!   **re-reads the configuration file** every time it is called, and refuses a configuration that
-//!   would weaken the security of the connection compared with the one in force
-//!   ([`SecurityPosture`]).
+//!   differs from the startup one, secrets aside ([`SecurityPosture`]).
 //! - [`RecoveryPolicy`] tunes the supervisor: polling interval, back-off and give-up delay.
 //! - [`ManagedProducer::close`] ends the life of the producer at shutdown: it waits for the last
 //!   user to release it, then for its destruction.
-//! - [`wait_for_retired_producers`] is the lower-level primitive behind it: it waits until the
-//!   reaper thread has destroyed every producer retired so far.
+//! - [`wait_for_retired_producers`] is a lower-level, blocking primitive: it waits until the reaper
+//!   thread has destroyed every producer retired so far.
 //!
 //! ## Recovery lifecycle
 //!
@@ -50,8 +49,9 @@
 //! A replaced producer is not destroyed right away, since listeners may still be using it. The
 //! supervisor first waits, polling every 5 ms, for the last user to release it. It then hands the
 //! `librdkafka` client to a dedicated thread, which destroys it, and waits for that to be done.
-//! Each of these two stages is bounded by 5 seconds. On a timeout, a warning is logged and the
-//! producer is destroyed later, once its last user releases it.
+//! Each of these two stages is bounded by 5 seconds, and a timeout logs a warning. After a timeout
+//! of the first stage, the producer is destroyed once its last user releases it. After a timeout of
+//! the second one, it stays with the reaper thread.
 //!
 //! The supervisor does not watch the new producer in the meantime: a retirement can delay the
 //! detection of a new fatal error by up to about 10 seconds.
@@ -143,7 +143,7 @@ fn reaper() -> &'static Sender<ReaperTargets> {
 /// acknowledgment, so that no `librdkafka` client is still being torn down when it returns.
 ///
 /// **This function blocks the calling thread** for up to `timeout`. From async code, prefer
-/// [`ManagedProducer::close`], which relies on it without blocking the executor.
+/// [`ManagedProducer::close`], which waits for the reaper thread without blocking the executor.
 ///
 /// It only waits for producers that have already been retired. The producer currently in use is
 /// retired once its last user releases it, which this function does not trigger: [`close`] does,
@@ -193,20 +193,10 @@ fn wait_for_reaper(timeout: Duration) -> Result<bool, NbdError> {
 
 /// Builds a `librdkafka` producer from a validated [`ProducerConfig`].
 ///
-/// Applies, in this order:
-///
-/// 1. the TLS settings (`ssl.*`), when `config.tls` is set;
-/// 2. `security.protocol`, as derived by the configuration validation;
-/// 3. the SASL settings, for the configured authentication mechanism
-///    (credentials, Kerberos with `kafka-auth-gssapi`, OAuth 2.0 with `kafka-auth-oauth`);
-/// 4. the broker address and the producer tuning (timeouts, retries, compression, idempotence,
-///    queueing, batching and acknowledgments).
-///
-/// Secrets are resolved and exposed only to fill the `librdkafka` client configuration, which is
-/// local to this function and dropped on return. The temporary copies this function creates (TLS
-/// key password, OAuth client secret) are zeroized right after use. The SASL username and password
-/// are read straight from `config`: erase them with [`ProducerConfig::erase_secrets`] once the
-/// producer is built, as the daemon does.
+/// The settings are applied by [`ProducerConfig::configure`], whose client configuration is local
+/// to this function and dropped on return. The SASL username and password are read straight from
+/// `config`: erase them with [`ProducerConfig::erase_secrets`] once the producer is built, as the
+/// daemon does.
 ///
 /// What this function cannot erase: the strings of the client configuration are plain `String`s,
 /// released at the end of the function but not zeroized, and `librdkafka` keeps its own copy for
@@ -223,7 +213,8 @@ fn wait_for_reaper(timeout: Duration) -> Result<bool, NbdError> {
 ///
 /// Returns [`NbdError::Config`] when a secret cannot be resolved (missing environment variable,
 /// unreadable secrets file), and [`NbdError::Kafka`] when `librdkafka` rejects the configuration
-/// or fails to create the client (for instance, unusable TLS material).
+/// or fails to create the client (for instance, unusable TLS material, or a `linger` that is not
+/// lower than `message_timeout`).
 pub fn build_producer(config: &ProducerConfig) -> Result<FutureProducer, NbdError> {
     let client = config.configure()?;
     Ok(client.create::<FutureProducer>()?)
@@ -327,8 +318,8 @@ pub struct ProducerContainer {
 /// - [`submit`](MessageSink::submit) fails with
 ///   `NbdError::Kafka(KafkaError::MessageProduction(RDKafkaErrorCode::Fatal))`. The datagram is
 ///   lost (a UDP multicast feed cannot be replayed) and counted by the listener as a sender error.
-/// - Messages already in flight on the faulted producer may or may not be delivered: this is up
-///   to `librdkafka`. NBD never flushes a producer before retiring it.
+/// - NBD never flushes a producer before retiring it. The messages still queued or in flight on
+///   the faulted producer are purged when it is destroyed.
 /// - As soon as the new producer is published, new submissions use it.
 ///
 /// ## After `close`
@@ -351,8 +342,8 @@ pub struct ProducerContainer {
 /// Building a producer does **not** wait for the broker, so a recreation does not fail because
 /// the broker is unreachable, and, unlike at startup, the broker is not probed afterwards. A
 /// recreation fails, and counts against `kafka.recovery_timeout`, when the factory fails:
-/// unreadable or invalid configuration file, unresolvable secrets, a permission violation on a
-/// secret-bearing file, a configuration refused because it weakens the security of the connection
+/// unreadable or invalid configuration file, unresolvable broker address or secrets, a permission
+/// violation on one of the files, a configuration refused because it differs from the startup one
 /// (see [`SecurityPosture`]), or TLS/SASL material rejected by `librdkafka`.
 ///
 /// ## Metrics
@@ -370,22 +361,20 @@ pub struct ProducerContainer {
 ///
 /// ## Security considerations
 ///
-/// Because [`producer_factory`] re-reads the `[kafka]` section and re-resolves its secrets
-/// (environment variables, secret files) every time a producer is rebuilt:
+/// Because [`producer_factory`] re-reads the configuration file and re-resolves the secrets of the
+/// `[kafka]` section every time a producer is rebuilt:
 ///
 /// - the configuration file and every file it references (CA, certificate, key, keytab, secret
 ///   files) must stay readable, and protected against unauthorized modification, for the whole
 ///   life of the daemon;
-/// - a change made to the `[kafka]` section after startup takes effect at the next recreation,
-///   without a restart, unless it weakens the security of the connection: the factory compares the
-///   [`SecurityPosture`] of the new configuration with the one of the running producer, and
-///   refuses a removed or replaced CA, a removed client certificate or key, a removed or weaker SASL
-///   mechanism. A change of broker, and everything a posture does not cover (credentials, the
-///   content of the files), is applied. The other sections are not re-read;
+/// - any change made after startup to the non-secret settings of `[kafka]` is refused, even an
+///   improvement: the factory compares the [`SecurityPosture`] of the new configuration with the
+///   one recorded at startup. What a posture does not cover (credentials, the content of the files)
+///   is applied, without any message, except for `{ env = ... }` secrets, which keep their value
+///   until a restart. The other sections are parsed but not used;
 /// - the file permission checks of [`check_secrets`] are enforced again;
-/// - the validation warnings (low timeouts, SASL credentials without TLS, ...) are muted during
-///   the rebuild, but the differences of posture are logged: an error for each refused change, a
-///   warning for each accepted one;
+/// - the logs of the validation (low timeouts, ...) are muted during the rebuild, but a refusal of
+///   the posture check is logged as an error, with the names of the settings that differ;
 /// - credentials briefly live again in the process memory while the new producer is built. The
 ///   copies NBD owns are erased as soon as the producer exists (the text of the configuration
 ///   file is zeroized once parsed, and the temporary [`ProducerConfig`] is erased with
@@ -394,10 +383,10 @@ pub struct ProducerContainer {
 ///
 /// A refusal is not the end of the story: the attempts go on until `kafka.recovery_timeout`
 /// elapses, then the daemon exits, and a restart reads the file as a startup does, which has no
-/// posture to compare with and accepts whatever the file contains. The check makes a downgrade
-/// loud and delays it, it does not replace the protection of the files.
+/// posture to compare with and accepts whatever the file contains. The check makes a change loud
+/// and delays it, it does not replace the protection of the files.
 ///
-/// See `SECURITY.md` for the corresponding deployment recommendations.
+/// See `PRODUCTION.md` for the corresponding deployment recommendations.
 ///
 /// ## Example
 ///
@@ -412,7 +401,7 @@ pub struct ProducerContainer {
 ///
 /// # async fn run() -> Result<(), nbd::NbdError> {
 /// let path = PathBuf::from("config.toml");
-/// let mut config = Config::try_from(RawConfig::from_path(&path)?)?;
+/// let mut config = Config::try_from(RawConfig::from_path(&path, true)?)?;
 ///
 /// // Build the first producer and wrap it, then erase the secrets of the configuration. The
 /// // posture, which holds no secret, is what later rebuilds are compared with.
@@ -750,36 +739,33 @@ pub type ProducerFactory = Arc<dyn Fn() -> Result<FutureProducer, NbdError> + Se
 /// 1. read and parse the file, then zeroize the text that was read;
 /// 2. enforce the permission checks on the files that carry secrets ([`check_secrets`]);
 /// 3. validate the `[kafka]` section, with the log output muted;
-/// 4. compare the [`SecurityPosture`] of that configuration with the current one
-///    ([`SecurityPosture::check_against`]), and stop here, after erasing the secrets, if it weakens
-///    the connection;
-/// 5. resolve the secrets again, call [`build_producer`], then erase the secrets of the temporary
-///    configuration ([`ProducerConfig::erase_secrets`]);
-/// 6. when the producer was built, adopt the posture of the new configuration as the current one.
+/// 4. compare the [`SecurityPosture`] of that configuration with `posture`
+///    ([`SecurityPosture::check_against`]), and stop here, after erasing the secrets, if they
+///    differ;
+/// 5. call [`build_producer`], then erase the secrets of the temporary configuration
+///    ([`ProducerConfig::erase_secrets`]).
 ///
-/// As a consequence, an edit of the `[kafka]` section made while the daemon runs (new broker,
-/// rotated credentials, other TLS files) is picked up at the next recreation, unless it weakens
-/// the connection, and the files it references must still be readable. Only that section is used:
-/// nothing else is reloaded. The broker is not probed, see [`build_producer`].
+/// As a consequence, rotated secrets and replaced file contents are picked up at the next
+/// recreation, and any other edit of the `[kafka]` section made while the daemon runs is refused
+/// until a restart. The files it references must still be readable. The whole file must parse in
+/// every section, an unknown key, a malformed value or a missing `[[provider]]` being an error, but
+/// only `[kafka]` is validated and used: nothing else is reloaded. The broker address is resolved
+/// again, and a failure is an error, but the broker itself is not probed, see [`build_producer`].
 ///
-/// `posture` is the posture of the producer in force when the factory is created, usually the one
-/// of the configuration the daemon started with (see [`ProducerConfig::posture`]). It then follows
-/// the producers that are successfully built: a change that was accepted becomes the reference of
-/// the next comparison, so that, for instance, a client certificate added at runtime cannot be
-/// removed at the next recreation.
+/// `posture` is the reference of every call: the posture of the configuration the daemon started
+/// with (see [`ProducerConfig::posture`]). It never changes.
 ///
-/// The validation of step 3 runs with `tracing` muted: its warnings (low timeouts, SASL
-/// credentials without TLS, ...) were already emitted at startup and would only be noise at each
-/// attempt. The comparison of step 4 is not muted: it reports an error for each refused change and
-/// a warning for each accepted one.
+/// The validation of step 3 runs with `tracing` muted: its warnings (low timeouts, ...) were
+/// already emitted at startup and would only be noise at each attempt. The comparison of step 4 is
+/// not muted.
 ///
 /// # Errors
 ///
 /// Each call of the returned factory fails with [`NbdError::Config`] when the file cannot be
 /// read, is no longer valid TOML, violates the permission checks, contains an invalid value, or
-/// weakens the security of the connection, and with the errors of [`build_producer`] otherwise.
-/// The message for an invalid TOML file gives the line and column but does not repeat the
-/// offending text, which could contain a secret literal.
+/// differs from `posture`, and with the errors of [`build_producer`] otherwise. The message for an
+/// invalid TOML file gives the line and column but does not repeat the offending text, which could
+/// contain a secret literal. Only a type error quotes the value it refused.
 pub fn producer_factory(config_path: PathBuf, posture: SecurityPosture) -> ProducerFactory {
     Arc::new(move || {
         let raw_config = RawConfig::from_path(&config_path, true)?;

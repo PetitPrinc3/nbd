@@ -132,6 +132,8 @@ async fn spike_test() {
         .try_into()
         .unwrap();
 
+    assert_ne!(total_received_bytes, 0);
+
     show_report(
         &format!("{}-seconds-spike-test", SPIKE_TEST_DURATION_SECONDS),
         test_sink.latencies.lock().unwrap().to_vec(),

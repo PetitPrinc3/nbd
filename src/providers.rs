@@ -1,8 +1,9 @@
 //! Core UDP multicast ingestion engine.
 //!
 //! This module configures OS-level multicast sockets (IGMP/MLD) using [`socket2`],
-//! binds to specified network interfaces, and runs a zero-copy asynchronous receive
-//! loop that streams incoming UDP packets to any [`MessageSink`] implementation.
+//! binds to specified network interfaces, and runs an asynchronous receive loop,
+//! without any payload copy in NBD, that streams incoming UDP packets to any
+//! [`MessageSink`] implementation.
 //!
 //! ## Zero-copy buffer strategy
 //!
@@ -10,7 +11,10 @@
 //! the consumed bytes are split off via `split_to(len).freeze()`, producing a
 //! reference-counted, immutable [`Bytes`](bytes::Bytes) handle — **no payload memory
 //! is copied**. The buffer is re-allocated only when remaining capacity drops below
-//! the configured `message_size`.
+//! the largest UDP payload ([`MAX_UDP_PAYLOAD`]).
+//!
+//! This covers NBD's own path. The kernel still copies the datagram into the buffer, and
+//! the Kafka sinks hand it to `librdkafka`, which copies it into its queue.
 //!
 //! ## Concurrency & Backpressure
 //!
@@ -56,14 +60,16 @@ use crate::sinks::MessageSink;
 /// ## Lifecycle
 ///
 /// 1. Create from configuration: `Provider::from(&ProviderConfig)`
-/// 2. Subscribe to multicast group: [`subscribe()`](Provider::subscribe) — creates the socket,
-///    sets options (`reuse_address`, `nonblocking`, buffer size), and joins the multicast group.
+/// 2. Subscribe to multicast group: [`subscribe()`](Provider::subscribe) — creates the socket
+///    ([`create_socket()`](Provider::create_socket)) and joins the multicast group
+///    ([`join()`](Provider::join)). The daemon calls these two separately, so that it only joins
+///    the groups once the Kafka broker has answered.
 /// 3. Start receiving: [`start_listener()`](Provider::start_listener) — runs the async receive
 ///    loop, dispatching payloads to the given [`MessageSink`].
 pub struct Provider {
     /// The multicast group this provider listens to.
     pub group: IpAddr,
-    /// `group` as the label of the metrics of this provider (feature `metrics-exporter`).
+    /// `<group>:<port>`, the label of the metrics of this provider (feature `metrics-exporter`).
     pub group_label: Arc<str>,
     topic: Arc<str>,
     port: u16,
@@ -86,7 +92,19 @@ impl From<&ProviderConfig> for Provider {
 }
 
 impl Provider {
-    /// Create the listening socket
+    /// Creates the listening socket, without joining the group.
+    ///
+    /// Sets the size of the receive buffer to `max_buffer_size` bytes, and enables address reuse
+    /// and non-blocking mode. On Linux, it disables `IP_MULTICAST_ALL`, binds the socket to the
+    /// configured interface (`SO_BINDTODEVICE`) and to the group address, so that the socket only
+    /// receives this group on this interface. On other systems, it binds to the wildcard address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NbdError::Config`] when the kernel grants a smaller receive buffer than requested
+    /// (on Linux, `net.core.rmem_max` is the limit), [`NbdError::Socket`] when the binding fails or
+    /// the interface cannot be found, and [`NbdError::Network`] when the socket cannot be created
+    /// or configured.
     pub fn create_socket(&mut self, max_buffer_size: &usize) -> Result<(), NbdError> {
         let domain = if self.group.is_ipv4() {
             Domain::IPV4
@@ -107,7 +125,7 @@ impl Provider {
 
         if granted < *max_buffer_size {
             error!(
-                "The kernel granted a smaller buffer size than requested : {} < {}. Raise `net.core.rmem_max` accordingly (see the README.md).",
+                "The kernel granted a smaller buffer size than requested : {} < {}. Raise `net.core.rmem_max` accordingly (see PRODUCTION.md).",
                 granted, max_buffer_size
             );
             return Err(NbdError::Config(format!(
@@ -165,6 +183,13 @@ impl Provider {
         Ok(())
     }
 
+    /// Joins the multicast group on the configured interface, with an IGMP join for an IPv4 group
+    /// and an MLD join for an IPv6 group.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NbdError::Socket`] when the socket doesn't exist or the interface cannot be found,
+    /// and [`NbdError::Network`] when the group cannot be joined.
     pub fn join(&self) -> Result<(), NbdError> {
         let socket = self.socket()?;
         let idx = self.interface.index()?;
@@ -192,26 +217,20 @@ impl Provider {
     /// # Errors
     ///
     /// Returns [`NbdError::Socket`] when the socket doesn't exist: before
-    /// [`subscribe`](Provider::subscribe), and once [`start_listener`](Provider::start_listener)
-    /// has taken it.
+    /// [`create_socket`](Provider::create_socket), and once
+    /// [`start_listener`](Provider::start_listener) has taken it.
     pub fn socket(&self) -> Result<&Socket, NbdError> {
         self.socket
             .as_ref()
             .ok_or_else(|| NbdError::Socket(String::from("The socket doesn't exist yet.")))
     }
 
-    /// Subscribes to the provider's multicast group on the configured interface, with an IGMP join
-    /// for an IPv4 group and an MLD join for an IPv6 group.
-    ///
-    /// Creates the socket, sets the size of its receive buffer to `max_buffer_size` bytes, enables
-    /// address reuse (and port reuse on Unix) and non-blocking mode, binds it to the provider's
-    /// port on all addresses, then joins the group. An interface of the wrong IP family is replaced
-    /// by the default one, with a warning.
+    /// Subscribes to the provider's multicast group: [`create_socket`](Provider::create_socket),
+    /// then [`join`](Provider::join).
     ///
     /// # Errors
     ///
-    /// Returns [`NbdError::Socket`] when the binding fails, and [`NbdError::Network`] when the
-    /// socket cannot be created or configured, or the group cannot be joined.
+    /// Returns the errors of these two functions.
     pub fn subscribe(&mut self, max_buffer_size: &usize) -> Result<(), NbdError> {
         self.create_socket(max_buffer_size)?;
         self.join()
@@ -224,7 +243,8 @@ impl Provider {
     /// - **Receive**: reads into `BytesMut`, splits via zero-copy `freeze()`, and submits
     ///   non-blockingly via [`sink.submit()`](MessageSink::submit). On success, the delivery
     ///   confirmation future is pushed into `in_flight`. If the queue is full ([`NbdError::Backpressure`]),
-    ///   it records backpressure telemetry without blocking packet reception.
+    ///   it records backpressure telemetry without blocking packet reception. Empty datagrams are
+    ///   counted and not submitted.
     /// - **Completion**: polls and drains completed delivery confirmations from `in_flight`
     ///   in batches via `now_or_never()`.
     ///
@@ -232,8 +252,8 @@ impl Provider {
     ///
     /// Returns [`NbdError::Socket`] if the socket has not been created (call
     /// [`subscribe`](Provider::subscribe) first), and [`NbdError::Network`] if it cannot be handed
-    /// over to the Tokio runtime. An error while receiving a datagram is not fatal: it is logged and
-    /// counted, and the loop goes on.
+    /// over to the Tokio runtime. An error while receiving a datagram is not fatal: it is counted,
+    /// logged at most once per second, and the loop goes on.
     pub async fn start_listener<S: MessageSink>(
         &mut self,
         sink: S,

@@ -6,41 +6,104 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased](https://github.com/PetitPrinc3/nbd/compare/v0.1.1-beta...HEAD)
 
+Breaking: the configuration now fails closed, and files written for `0.1.x` are refused.
+
+### Migrating from 0.1.x
+
+Run `nbd --check-config-file` on your file, then:
+
+| `0.1.x` | `0.2.0-beta` |
+|---|---|
+| `provider.message_size` | Remove it |
+| `provider.interface` as an IP address or an integer | Interface name (`"eth0"`) on Linux, index as a string (`"2"`) elsewhere |
+| `provider.topic`, `port` or `interface` not set, `port = 0` | Set them: required |
+| `provider.topic` of 250 to 254 characters | 249 at most |
+| Two providers on the same `group` and `port` | Remove the duplicate |
+| `kafka.compression` not set | The default is now `none`. Set `lz4` to keep the former default |
+| `kafka.compression = "zstd"` | Use `lz4`, `gzip`, `snappy` or `none` |
+| `message_retries = 0`, invalid `acks` or `compression`, any value that was replaced by a default | Fix it: now an error |
+| `connection_timeout = 0`, `message_timeout = 0` or above `300000`, `queue_size = 0`, `parallel_requests = 0` | Fix it: now an error |
+| `idempotence = true` with `acks` set to `1` or `0` | Remove it, or set it to `false` |
+| `parallel_requests` above 5 with idempotence | Lower it, or disable idempotence |
+| `kafka.broker` that doesn't resolve | Now an error, at startup and at every producer rebuild |
+| `[kafka.auth]` without `[kafka.tls]` | Add TLS, or set `allow_insecure_transport = true` |
+| OAuth `token_endpoint_url` that isn't `https://` | Use HTTPS, or set `allow_insecure_transport = true` |
+| Kerberos `keytab` relative, or with `"`, `$`, `` ` ``, `\` or a line break | Use a plain absolute path |
+| Kerberos `principal` or `service_name` outside `[a-zA-Z0-9._/@-]`, or starting with `-` | Fix it: now an error |
+| No `[metrics]` section | The exporter no longer starts: add the section |
+| `[metrics]` without `interface`, or with an address not on the host | Set a valid `interface`: required |
+| `metrics.interface` not on loopback | Set `allow_remote_metrics = true` and firewall the port |
+| `[metrics]` in a binary without `metrics-exporter` | Remove the section |
+| Unknown keys outside `[kafka]` | Remove them: now errors |
+
+On the host:
+
+- `socket_buffer_size` can't exceed `net.core.rmem_max`: NBD refuses to start instead of getting a smaller buffer. It is also limited to 1 GiB.
+- See [File permissions](CONFIGURATION.md#file-permissions) for the new rules. They refuse files in `/tmp` and Kubernetes secret volumes, among others.
+
+In your monitoring:
+
+- `nbd_errors_kafka_total` is renamed `nbd_errors_kafka_transmission_total`.
+- The `group` label is now `<group>:<port>`.
+
 ### Added
 
-- Self-healing Kafka producer: the production sink is now a `ManagedProducer`, supervised by a task that replaces the `librdkafka` producer with a fresh one when it raises a fatal error. Listeners keep their handle and no restart is needed. The replaced producers are destroyed on a dedicated `nbd-kafka-reaper` thread, off the hot path.
-- `kafka.recovery_timeout` parameter (default `600000` ms; `0` is replaced by the default, values below `10000` ms trigger a warning): how long NBD keeps failing to rebuild the producer before exiting with an error. Attempts are spaced out with an exponential back-off (1 s to 60 s).
-- Prometheus metrics (`metrics-exporter` feature): `nbd_errors_kafka_fatal_total`, `nbd_kafka_recreation_total` and `nbd_kafka_producer_generation`.
-- Security posture of the Kafka connection (`SecurityPosture`, `ProducerConfig::posture`): the broker, the paths of the TLS files and the SASL mechanism NBD started with, kept without any secret. A producer rebuild is checked against it, see *Security* below.
-- Public API: `ManagedProducer` (with `close`), `RecoveryPolicy`, `build_producer`, `producer_factory` (which takes the `SecurityPosture` to enforce), `wait_for_retired_producers`, `ProducerConfig` (with `erase_secrets` and `posture`), `SecurityPosture`, `SecretSource::erase`, `UnwindShield` and the `NbdError::Recovery` variant.
+- Self-healing Kafka producer: `ManagedProducer`, supervised by a task that replaces the producer after a fatal error. Replaced producers are destroyed on the `nbd-kafka-reaper` thread.
+- `kafka.recovery_timeout` (default `600000` ms), `kafka.queue_weight` (default `100000` KiB), `kafka.allow_insecure_transport` and `metrics.allow_remote_metrics`.
+- Metrics: `nbd_errors_kafka_fatal_total`, `nbd_kafka_recreation_total`, `nbd_kafka_producer_generation`.
+- `--check-config-file` submits the settings to `librdkafka`, without creating a client.
+- Release pipeline: a `verify` job gates the builds, and releases come with `SHA256SUMS` and build provenance attestations.
+- CI: `cargo vet`, Dependabot, a daily audit run, configuration tests on every feature combination, a build with Rust 1.95 (Ferrocene 26.05).
+- API: `ManagedProducer`, `RecoveryPolicy`, `build_producer`, `producer_factory`, `wait_for_retired_producers`, `ProducerConfig` (`configure`, `check`, `erase_secrets`, `posture`), `SecurityPosture`, `SecretSource::erase`, `Provider::create_socket`, `Provider::join`, `UnwindShield`, `NbdError::Recovery`.
 
 ### Changed
 
-- **Metrics:** `nbd_errors_kafka_total` is renamed `nbd_errors_kafka_transmission_total`. Update the dashboards and alerts that use the old name.
-- Kafka delivery failure warnings are limited to one per topic and per second, so that a broker outage cannot flood the logs. `nbd_errors_kafka_transmission_total` still counts every failure.
-- The Kafka producer is built by `build_producer` (extracted from `main.rs`).
-- Shutdown now also stops the supervisor and closes the producer (`ManagedProducer::close`), which waits for it to be released by the listeners and then destroyed. Each stage is bounded to 5 seconds like the listeners drain (twice for the producer). The final `NBD exited gracefully.` log line is replaced by one line per stage (`All listeners were stopped gracefully.`, `Supervisor task stopped gracefully.`, `All producers were stopped gracefully.`).
-- A replaced producer is retired by the supervisor, which waits for the listeners to release it and for its destruction (5 seconds each at most) before it resumes watching the new producer.
-- **API:** `NbdError::Network` and `NbdError::TaskPanic` now carry an `UnwindShield<std::io::Error>` and an `UnwindShield<tokio::task::JoinError>`, so that `NbdError` is `UnwindSafe` and `RefUnwindSafe`. Build them with `NbdError::from(error)` and get the error back with `UnwindShield::into_inner`.
-- **API:** `Provider::get_socket` is renamed `Provider::socket`, following the Rust API Guidelines naming of getters (ANSSI `LANG-NAMING`).
-- `providers[].message_size` is now consistently capped to 65,507 bytes (the UDP maximum), as the warning has always announced. Before, such a value was replaced by the default (1,500) or, when it also exceeded `nbd.socket_buffer_size`, left unbounded.
-- `BenchSink` and `IPerfSink` reject a packet whose timestamp is later than its reception time with `NbdError::InvalidPacket`, instead of computing a latency from it.
-- The daemon exits with an error, after its graceful shutdown, if the producer supervisor fails or gives up.
-- Upgrade `Rust` from `1.97.1` to `1.99.1`.
-- New dependency: `arc-swap`.
-- Documentation: every public item of the library now has a `cargo doc` comment, and the module documentation describes the configuration behaviors that were not written down (replacement of invalid values by defaults, unknown keys, default configuration path, `RUST_LOG`, coverage of the permission check). The README has a reference of the validation rules, an accurate description of the CI/CD pipelines (including the fact that the released binaries are built without TLS or SASL support), and the instructions of the kernel tuning no longer depend on a file that isn't in the repository. `SECURITY.md` documents the runtime behavior of the producer recovery, the explicit secret erasure and the security posture check, and its compliance matrix is reviewed against the code. `PERFORMANCE.md` states which version its figures come from.
+- Configuration: invalid values are errors, every section rejects unknown keys, and `provider.topic`, `port`, `interface` and `metrics.interface` are required.
+- Configuration: `kafka.compression` defaults to `none`, and `zstd` is no longer accepted.
+- The exporter only starts with a `[metrics]` section.
+- Metrics: `nbd_errors_kafka_total` is renamed, and the `group` label is `<group>:<port>`.
+- Listeners: sockets are bound to their interface (`SO_BINDTODEVICE`) and group on Linux, with `IP_MULTICAST_ALL` disabled, and groups are joined by interface index. `SO_REUSEPORT` is no longer set.
+- Listeners: sockets are created before the connection to Kafka, and groups are joined after it.
+- Listeners: the receive buffer is a fixed 6.55 MB per provider.
+- Logs: socket errors and delivery failures are limited to one line per second, per provider and per topic.
+- Shutdown also stops the supervisor and closes the producer, with one log line per stage instead of `NBD exited gracefully.`
+- The daemon exits with an error, after its graceful shutdown, if the supervisor fails or gives up.
+- `BenchSink` and `IPerfSink` reject a timestamp later than the reception time.
+- `kafka-auth-oauth` enables `kafka-tls`.
+- `build.rs` fails the build on an invalid `SOURCE_DATE_EPOCH`.
+- Benchmarks take their interface from `NBD_TEST_INTERFACE`, and no longer raise the Windows timer resolution.
+- Release assets are renamed `nbd-<tag>-linux-x86_64[-with-metrics]` and `nbd-<tag>-windows[-with-metrics].exe`.
+- API: `RawConfig::from_path` takes a `safe_output` argument.
+- API: `Interface` is a validated name or index, built with `Interface::try_from`. `ProviderConfig` no longer has `message_size`.
+- API: `NbdError::Network` and `NbdError::TaskPanic` carry an `UnwindShield`, so that `NbdError` is `UnwindSafe`.
+- API: `Provider::get_socket` is renamed `Provider::socket` (ANSSI `LANG-NAMING`).
+- Rust `1.97.1` to `1.99.1`. New dependency: `arc-swap`.
+- Documentation rewritten: shorter `README.md`, new `CONFIGURATION.md` and `PRODUCTION.md`. The ANSSI matrix reports the validation of dependencies as partially compliant.
+
+### Removed
+
+- `provider.message_size`.
+- The defaults of `provider.topic`, `provider.port` and `provider.interface`.
+- The `workflow_dispatch` trigger of the release pipeline.
 
 ### Fixed
 
-- The default-value warning of the `kafka.connection_timeout` parameter named it `nbd.kafka.connection_timeout`.
-- Removed an unnecessary trailing `]` in the `BUILD_FEATURES` string for binaries compiled without any feature.
+- The default-value warning of `kafka.connection_timeout` named it `nbd.kafka.connection_timeout`.
+- Trailing `]` in `BUILD_FEATURES` for binaries compiled without any feature.
 
 ### Security
 
-- Secrets are now erased explicitly once used, in addition to being zeroized on drop: the text of the configuration file once parsed, the literal secrets of the raw configuration once resolved, the temporary copies made by `build_producer`, and the validated `ProducerConfig` once the Kafka producer is created (at startup, with `--check-config-file`, and at each producer recreation). Copies held by `librdkafka`, by its client configuration, and by a TOML parse error are not covered.
-- The library and the daemon now deny, through `clippy`, `unwrap`, `expect`, `panic!`, `unreachable!`, `todo!`, `unimplemented!`, unchecked arithmetic, and unchecked indexing and string slicing. The remaining `unwrap` calls, in `BenchSink` and `IPerfSink`, are replaced by error returns, and unchecked arithmetic on buffer sizes, default ports and back-off delays is replaced by saturating operations. The crates of `tests/` are not covered.
+- SASL without TLS and a non-HTTPS OAuth token endpoint are refused unless `allow_insecure_transport = true`.
+- TLS certificate and hostname verification are set explicitly.
+- A metrics `interface` outside loopback is refused unless `allow_remote_metrics = true`.
+- File checks: the configuration file is always checked, the CA and client certificate too, symbolic links are refused, and parent directories must not be writable by group or others.
+- Kerberos: `keytab` and `principal` are restricted, since `librdkafka` passes them to `kinit` through a shell. `service_name` follows the same alphabet.
+- A producer rebuild refuses any change to the non-secret settings of `[kafka]` (`SecurityPosture`). Secrets and file contents aren't compared, so that they can be rotated. A restart applies the file.
+- TOML errors no longer print the offending line in the daemon, in rebuilds, or from `--check-config-file` when its output isn't a terminal. A type error still quotes the refused value.
+- Secrets are erased explicitly once used, on top of the zeroization on drop.
+- `clippy` denies `unwrap`, `expect`, `panic!`, `unreachable!`, `todo!`, `unimplemented!`, unchecked arithmetic, and unchecked indexing and slicing in `src/`.
 - `NbdError` is checked at compile time to be `Send`, `Sync`, `UnwindSafe` and `RefUnwindSafe`.
-- A Kafka producer rebuild is refused when the `[kafka]` section it re-reads would weaken the connection compared with the one NBD started with (or with the last one that was applied): `[kafka.tls]` removed, `ca_file` changed, client certificate or key removed, SASL removed or replaced by a weaker mechanism. The refusal is logged at `error` level and counts as a failed rebuild attempt, retried with the usual back-off until `kafka.recovery_timeout`. A change of broker, or any other change of the TLS settings, is applied with a `warn` log. Changes of credentials, of file contents and of the other `[kafka]` parameters are not compared. This notifies and slows down a change of the configuration file made behind the operator's back, it doesn't replace the protection of the integrity of the file (see `SECURITY.md`).
+- CI: actions pinned by commit, read-only permissions by default, no persisted checkout credentials, pinned audit tools, `--locked` builds.
 
 ## [0.1.1-beta](https://github.com/PetitPrinc3/nbd/compare/v0.1.0-beta...v0.1.1-beta) - 2026-09-22
 

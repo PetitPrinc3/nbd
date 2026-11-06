@@ -22,7 +22,8 @@
 //!
 //! - **Configuration** ([`Config`], [`RawConfig`]) — Two-stage TOML configuration parsing and validation.
 //! - **Error handling** ([`NbdError`], [`UnwindShield`]) — Centralized error types via [`thiserror`].
-//! - **Multicast ingestion** ([`Provider`]) — UDP multicast socket management and zero-copy async receive loop.
+//! - **Multicast ingestion** ([`Provider`]) — UDP multicast socket management and async receive loop, without
+//!   any payload copy in NBD.
 //! - **Message sinks** ([`MessageSink`]) — Trait abstraction with Kafka, benchmark, and iperf implementations.
 //! - **Kafka resilience** ([`ManagedProducer`], [`RecoveryPolicy`]) — Self-healing Kafka producer: a supervisor
 //!   replaces the `librdkafka` client when it raises a fatal error.
@@ -35,24 +36,22 @@
 //! while the listeners keep using the same handle. If the producer cannot be rebuilt within
 //! `kafka.recovery_timeout`, the supervisor returns [`NbdError::Recovery`] and the daemon exits.
 //!
-//! Rebuilding a producer re-reads the `[kafka]` section of the configuration file and re-resolves
-//! its secrets, so the configuration file and the files it references must stay readable and
-//! protected for the whole life of the daemon. A rebuild that would weaken the security of the
-//! connection (TLS removed, CA replaced, weaker SASL mechanism, ...) is refused: the
-//! [`SecurityPosture`] of the new configuration is compared with the one in force. A change of
-//! broker, and anything a posture doesn't cover, is applied. [`ManagedProducer`] documents the
-//! behavior in detail, including the security considerations. At shutdown,
-//! [`ManagedProducer::close`] waits for the producer to be released and destroyed.
+//! Rebuilding a producer re-reads the configuration file, validates its `[kafka]` section and
+//! re-resolves its secrets, so the configuration file and the files it references must stay
+//! readable and protected for the whole life of the daemon. A rebuild refuses any difference with
+//! the [`SecurityPosture`] recorded at startup, which covers every non-secret setting of `[kafka]`:
+//! changing them takes a restart. Secrets and the content of the referenced files are not compared,
+//! so that they can be rotated. [`ManagedProducer`] documents the behavior in detail, including the
+//! security considerations. At shutdown, [`ManagedProducer::close`] waits for the producer to be
+//! released and destroyed.
 //!
 //! ## Configuration
 //!
 //! [`RawConfig::from_path`] reads the TOML file, then `Config::try_from` validates it and fills in
-//! the defaults (two stages: a permissive raw form, then a strongly-typed validated form). Most
-//! invalid values are replaced by a default and reported in the logs rather than refused. For
-//! instance, an invalid topic becomes `nbd-connector`. A few are errors: no `[[provider]]`, a
-//! group that is not multicast, an empty secret, a missing TLS or Kerberos file. The `[kafka]`
-//! section rejects unknown keys, the other sections ignore them. The README documents every
-//! parameter and its default.
+//! the defaults (two stages: a strict raw form, then a strongly-typed validated form). The
+//! configuration fails closed: unknown keys and invalid values are errors in every section, and
+//! only a missing optional parameter takes a default, reported in the logs. `CONFIGURATION.md`
+//! documents every parameter and its default.
 //!
 //! ## Hardening
 //!
@@ -80,7 +79,7 @@
 //! use std::path::PathBuf;
 //!
 //! # fn main() -> Result<(), NbdError> {
-//! let raw = RawConfig::from_path(&PathBuf::from("config.toml"))?;
+//! let raw = RawConfig::from_path(&PathBuf::from("config.toml"), true)?;
 //! let config = Config::try_from(raw)?;
 //!
 //! for provider_config in &config.provider {

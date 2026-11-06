@@ -2,8 +2,8 @@
 //! `BUILD_VERSION_FULL`) used by `--about` and `--version`.
 //!
 //! The build date is the current UTC time, or the time given by `SOURCE_DATE_EPOCH` when it is set,
-//! which makes the build reproducible. A `SOURCE_DATE_EPOCH` that is not an integer is read as `0`
-//! (1970-01-01), and one that is out of range makes the build script panic.
+//! which keeps it stable across builds (the release pipeline sets it to the date of the commit). A
+//! `SOURCE_DATE_EPOCH` that is not a valid timestamp fails the build.
 //!
 //! The enabled Cargo features are listed in `BUILD_FEATURES` and appended to the package version
 //! in `BUILD_VERSION_FULL`, e.g. `0.2.0-beta [+kafka-tls]`.

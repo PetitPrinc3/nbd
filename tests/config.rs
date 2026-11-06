@@ -1,3 +1,5 @@
+mod commons;
+
 use nbd::{Config, Credentials, RawConfig, RawCredentials, SecretSource, SecurityMechanism};
 use secrecy::{ExposeSecret, SecretString};
 use std::io::Write;
@@ -6,6 +8,8 @@ use std::io::Write;
 use nbd::check_secrets;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
+use commons::test_interface;
 
 const CANARY_SECRET: &str = "SuperSecretCanaryValue_98765!";
 
@@ -175,7 +179,8 @@ fn test_file_credentials_never_leaks() {
 /// This test checks that a normal minimal config is correctly parsed.
 #[test]
 fn test_config_validity() {
-    let valid_raw_toml_example = r#"
+    let valid_raw_toml_example = format!(
+        r#"
 [nbd]
 socket_buffer_size = 5000
 verbosity = "info"
@@ -196,10 +201,12 @@ parallel_requests = 5
 topic = "nbd-canary"
 group = "230.0.0.1"
 port = 20000
-interface = "lo"
-    "#;
+interface = "{}"
+    "#,
+        test_interface().as_str(),
+    );
 
-    let valid_raw_conf_example = toml::from_str::<RawConfig>(valid_raw_toml_example);
+    let valid_raw_conf_example = toml::from_str::<RawConfig>(&valid_raw_toml_example);
     assert!(valid_raw_conf_example.is_ok());
 
     let valid_conf_example = Config::try_from(valid_raw_conf_example.unwrap());
@@ -246,11 +253,12 @@ key_password = "some_fake_password"
 topic = "nbd-canary"
 group = "230.0.0.1"
 port = 20000
-interface = "lo"
+interface = "{}"
     "#,
         secrets_file.display(),
         secrets_file.display(),
-        secrets_file.display()
+        secrets_file.display(),
+        test_interface().as_str(),
     );
 
     let conf_file = temp_dir.as_path().join("nbd_canary_test_tls_conf.txt");
@@ -331,9 +339,10 @@ mechanism = "PLAIN"
 topic = "nbd-canary"
 group = "230.0.0.1"
 port = 20000
-interface = "lo"
+interface = "{}"
     "#,
-        secrets_file.display()
+        secrets_file.display(),
+        test_interface().as_str(),
     );
 
     let conf_file = temp_dir.as_path().join("nbd_canary_test_auth_conf.txt");
@@ -341,7 +350,6 @@ interface = "lo"
     writeln!(source_file, "{}", valid_raw_toml_example).unwrap();
 
     let valid_raw_conf_example = toml::from_str::<RawConfig>(&valid_raw_toml_example);
-
     assert!(valid_raw_conf_example.is_ok());
 
     #[cfg(unix)]
@@ -422,9 +430,10 @@ service_name: "paper_sale"
 topic = "nbd-canary"
 group = "230.0.0.1"
 port = 20000
-interface = "lo"
+interface = "{}"
     "#,
-        conf_file.display()
+        conf_file.display(),
+        test_interface().as_str(),
     );
 
     writeln!(source_file, "{}", invalid_raw_toml_example).unwrap();
@@ -465,9 +474,10 @@ service_name: "paper_sale"
 topic = "nbd-canary"
 group = "230.0.0.1"
 port = 20000
-interface = "lo"
+interface = "{}"
     "#,
-        conf_file.display()
+        conf_file.display(),
+        test_interface().as_str(),
     );
 
     writeln!(source_file, "{}", invalid_raw_toml_example).unwrap();
@@ -475,7 +485,8 @@ interface = "lo"
     let invalid_raw_conf_example = toml::from_str::<RawConfig>(&invalid_raw_toml_example);
     assert!(!invalid_raw_conf_example.is_ok());
 
-    let invalid_raw_toml_example = r#"
+    let invalid_raw_toml_example = format!(
+        r#"
 [nbd]
 socket_buffer_size = 5000
 verbosity = "info"
@@ -507,12 +518,14 @@ client_secret = "cece"
 topic = "nbd-canary"
 group = "230.0.0.1"
 port = 20000
-interface = "lo"
-    "#;
+interface = "{}"
+    "#,
+        test_interface().as_str(),
+    );
 
     writeln!(source_file, "{}", invalid_raw_toml_example).unwrap();
 
-    let invalid_raw_conf_example = toml::from_str::<RawConfig>(invalid_raw_toml_example);
+    let invalid_raw_conf_example = toml::from_str::<RawConfig>(&invalid_raw_toml_example);
     assert!(!invalid_raw_conf_example.is_ok());
 
     std::fs::remove_file(&conf_file).unwrap();

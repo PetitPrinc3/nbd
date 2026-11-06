@@ -135,6 +135,8 @@ async fn multi_channel_stress_test() {
         .flat_map(|s| s.state.lock().unwrap().latencies.to_vec())
         .collect();
 
+    assert_ne!(total_received_messages, 0);
+
     show_report(
         &format!(
             "{}-seconds-multi-iperf-stress-test",

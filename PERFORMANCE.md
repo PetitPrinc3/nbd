@@ -1,46 +1,48 @@
 # Performance
 
-This document details how **Nothing But Data**'s (NBD) performance is measured, and presents the corresponding results. Latency and throughput are characterized in several complementary ways, from isolated internal benchmarks up to a full end-to-end test.
+How NBD spends its time on the data path, how it is measured, and the results. For sizing and tuning, see [PRODUCTION.md](PRODUCTION.md#tuning).
 
-NBD's primary goal is to relay UDP multicast messages to a Kafka broker with the lowest possible latency. To evaluate this, the [end-to-end test](#end-to-end) measures the complete transaction, from UDP emission to Kafka delivery acknowledgment. However, most of the latency observed in that test was found to come from the broker itself, not from NBD.
+Performance depends on the combination of CPU cores, providers and packet rate, so measure NBD on your own hardware before going live. Under CPU saturation, the first symptom is packet loss in the kernel, then higher latency.
 
-For that reason, the tests below instead isolate **NBD's own internal processing latency**, which is what underpins the software's "sub-millisecond latency" claim:
+## Hot path
 
-- [`multi_channel_stress`](#multi_channel_stress) — a pure Rust benchmark that generates a cadenced network flow using Tokio. Being self-contained, this test is sensitive to the precision of its own emitter (see the difference with `multi_channel_iperf_stress` below).
-- [`multi_channel_iperf_stress`](#multi_channel_iperf_stress) — a Rust test that instead relies on an external `iperf2` process (required for UDP support, since `iperf3` doesn't support it) to generate the network flow in parallel.
+For each datagram, the task of a provider:
 
-NBD is a CPU-intensive process: performance depends heavily on the combination of available CPU cores, number of providers, and packet frequency, so there is no universal recommended "providers-per-core" ratio. Under CPU saturation, the first symptom is packet loss — datagrams dropped by the kernel before they reach NBD, and therefore not directly measurable by the application — followed by increased latency once saturation deepens. It is recommended to run an extended test campaign during a non-critical period to validate NBD's compliance with your own organization's requirements before going live.
+1. reads it into its preallocated `BytesMut` buffer, one copy from the kernel
+2. splits it into a reference-counted `Bytes`, without copying
+3. clones the `Arc<str>` of the topic, a reference count
+4. loads the current producer from an `ArcSwap`, lock-free
+5. calls `send_result`: `rdkafka` copies the topic name into a `CString`, and `librdkafka` copies the payload into its queue (`RD_KAFKA_MSG_F_COPY`). The `Bytes` is released right after, so the buffer can be reused before the delivery
+6. tracks the delivery: a `oneshot` channel and its boxed sender in `rdkafka`, a boxed future in NBD, and a task node in a `FuturesUnordered`
 
-## Contents
+NBD adds no payload copy of its own. A failed delivery copies the payload once more, in `rdkafka`.
 
-- [Test Environment](#test-environment)
-- [End-to-end](#end-to-end)
-- [Internal Process Latency](#internal-process-latency)
-    - [`multi_channel_stress`](#multi_channel_stress)
-    - [`multi_channel_iperf_stress`](#multi_channel_iperf_stress)
-        - [Network Capacity Analysis](#network-capacity-analysis)
-- [Resource Considerations](#resource-considerations)
+NBD's code takes no lock on this path. `librdkafka` takes its own, and with `metrics-exporter`, each counter goes through the read lock of the metrics registry. That feature adds two labelled counters per datagram and one per delivery.
 
-## Test Environment
+Off this path, the supervisor polls the producer every 500 ms, and retired producers are destroyed on the `nbd-kafka-reaper` thread, since `rd_kafka_destroy` blocks.
+
+NBD uses the multi-threaded Tokio runtime, with one worker per core and no pinning. `librdkafka` adds a main thread and one thread per broker connection, and `rdkafka` a polling thread for delivery reports.
+
+The release profile keeps `overflow-checks = true`. LTO and `codegen-units` keep their defaults, and the figures below don't cover other profiles.
+
+## Results
 
 > [!WARNING]
-> The figures of this document were last updated on 2026-09-10, for `0.1.0-beta`. They haven't been measured again for `0.2.0-beta`, which changed the benchmark sinks (`BenchSink`, `IPerfSink`: checked arithmetic, rejection of invalid timestamps), added saturating arithmetic on the listener's buffer reservation, and replaced the Kafka producer with a `ManagedProducer`. Re-run the campaign with the version you deploy before relying on these numbers.
+> These figures were last updated on 2026-09-10, for `0.1.0-beta`. Since then:
+>
+> - They were measured with `linger.ms = 0` and `lz4`, then hard-coded. The defaults are now `linger = 1` and `compression = "none"`, so the end-to-end figures can't be expected to hold with the default configuration.
+> - `queue_weight` limits the queue to about 100 MB by default, instead of `librdkafka`'s 1 GiB.
+> - The receive buffer of a provider is a fixed 6.55 MB, instead of 100 times `message_size`, and sockets are bound to their interface and group on Linux.
+> - The Kafka sink is a `ManagedProducer`.
+> - The tests no longer raise the resolution of the Windows timer, so the Windows figures can't be reproduced as they are.
 
-> [!NOTE]
-> Unless otherwise specified, all results below were obtained on a Debian 13.1 (Trixie) LXC container with 8 vCPU cores and 16 GB RAM, hosted on Proxmox.  
-> While NBD is compatible with Windows, it is developed for and intended to run on Linux.
+Unless stated otherwise, the host is a Debian 13.1 LXC container with 8 vCPU cores and 16 GB RAM, on Proxmox.
 
-## End-to-end
+### End-to-end
 
-The end-to-end test measures the complete message transaction — from UDP datagram emission to Kafka delivery acknowledgment. It is the most representative test of NBD's contribution to real-world pipeline latency, since it covers every hop the data actually travels through.
-The Kafka broker is a virtualized mock server provisioned by [Testcontainers](https://testcontainers.com/)' `Redpanda` module.
+From UDP emission to the Kafka delivery acknowledgment, over 300 seconds, against a Redpanda mock broker provisioned by [Testcontainers](https://testcontainers.com/). Most of this latency was attributed to the broker. Accuracy is the share of messages received by NBD that reached the broker.
 
-> [!NOTE]
-> This test runs from an external Python-based test harness, not from this repository's `tests/` suite — there is no corresponding Rust test file or `testcontainers` crate dependency here.
-
-### `e2e_perf_test`
-
-_(300 seconds)_
+The harness is an external Python project, not part of this repository. It needs the `nbd_e2e_latency` histogram, commented out in `src/sinks.rs`.
 
 | Providers | Bitrate (Mb/provider) | Flow (MB/s) | Accuracy (%) | p50 (µs) | p95 (µs) | p99 (µs) |
 | :-------: | --------------------- | ----------- | ------------ | -------- | -------- | -------- |
@@ -50,15 +52,14 @@ _(300 seconds)_
 |     3     | 100 000               | 151.8       | 100          | 474      | 1 720    | 4 379    |
 |     5     | 1 000                 | 215.4       | 100          | 838      | 3 901    | 6 814    |
 |     5     | 100 000               | 210.8       | 100          | 821      | 2 530    | 6 062    |
-> [!NOTE]
-> In this test, the accuracy column is the percentage of messages successfully received by the Kafka broker over the number of messages received by `nbd`.
-> In the following tests, the accuracy column represents the amount of messages processed by `nbd` over the number of messages sent, either by the tokio generated senders or the `iperf` binary.
 
-## Internal Process Latency
+### Internal latency
 
-### `multi_channel_stress`
+These tests use in-memory sinks: `librdkafka` and `ManagedProducer` aren't part of what they measure. Accuracy is the share of sent messages that NBD processed.
 
-_(300 seconds)_
+#### `multi_channel_stress`
+
+A self-contained Rust benchmark, with Tokio tasks as emitters, over 300 seconds. Its results depend on the precision of these emitters.
 
 |  Providers  | Pulse (Hz) | Flow (MB/s) | Accuracy (%) | p50 (µs) | p95 (µs) | p99 (µs) |
 | :---------: | ---------- | ----------- | ------------ | -------- | -------- | -------- |
@@ -83,9 +84,9 @@ _(300 seconds)_
 > |5|5 000|11.2|100|283|821|1 126|
 > |5|10 000|33.7|100|1 200|2 607|3 063|
 
-### `multi_channel_iperf_stress`
+#### `multi_channel_iperf_stress`
 
-_(300 seconds)_
+The traffic comes from external `iperf2` processes (`iperf3` doesn't support multicast), over 300 seconds. "Bitrate" is requested from `iperf`, "Flow" is measured by NBD.
 
 | Providers | Bitrate (Mb/provider) | Flow (MB/s) | Accuracy (%) | p50 (µs) | p95 (µs) | p99 (µs) |
 | :-------: | --------------------- | ----------- | ------------ | -------- | -------- | -------- |
@@ -104,11 +105,9 @@ _(300 seconds)_
 |    20     | 150                   | 282.5       | 98           | 46       | 201 434  | 378 398  |
 |    50     | 15                    | 98.3        | 100          | 6        | 31       | 47       |
 
-> The "Bitrate (Mb/provider)" column is the flow requested from `iperf`, while "Flow (MB/s)" is the flow actually measured by NBD, based on the total number of bytes processed. The gap between those two columns — while accuracy remains at or near 100% — points to a limitation of the host's network capabilities, not of the NBD software. This is confirmed below.
+#### Network capacity
 
-#### Network Capacity Analysis
-
-To verify that the gap between requested and measured throughput above comes from the host's network interface rather than from NBD, the requested bitrate is compared against two ceilings: the raw value requested via `iperf`, and the same value capped at what a 2.5 Gb/s NIC can physically sustain (2.5 Gb/s ÷ 8 = 312.5 MB/s).
+A gap between requested and measured flow, with accuracy near 100%, points at the test network rather than at NBD. This table compares the measured flow with the requested one, and with the same value capped at what a 2.5 Gb/s NIC sustains (312.5 MB/s).
 
 | Providers | Bitrate (Mb/provider) | Measured Flow (MB/s) | Expected (MB/s) | Measured / Expected | Expected (2.5 Gb/s cap) | Measured / Expected (2.5 Gb/s cap) |
 | :-------: | --------------------: | -------------------: | --------------: | ------------------: | ----------------------: | ---------------------------------: |
@@ -127,16 +126,34 @@ To verify that the gap between requested and measured throughput above comes fro
 |    20     |                   150 |                282.5 |             375 |              75.33% |                   312.5 |                             90.40% |
 |    50     |                    15 |                 98.3 |           93.75 |             104.85% |                   93.75 |                            104.85% |
 
-Once the 2.5 Gb/s link is taken into account, the multi-provider runs land between 55% and 105% of the theoretical maximum — instead of the near-zero ratios suggested by the raw comparison (e.g. 0.05% at 3 providers / 1,000,000 Mb). That supports the idea that the throughput ceiling observed under heavy load with several providers is a property of the test network's hardware, not a limitation of NBD itself.
+With the cap, multi-provider runs reach 55% to 105% of the ceiling. Single-provider runs plateau at about 64 MB/s: whether that comes from the single `iperf` stream or from the receive path of one provider hasn't been established.
 
-The single-provider runs don't fit that explanation: they plateau at about 64 MB/s, which is 51% of the requested rate at 1,000 Mb and 21% of the 2.5 Gb/s ceiling at 100,000 Mb. Whether that plateau comes from the sender (a single `iperf` stream) or from the receive path of one provider hasn't been established by these tests.
+Rows at about 104% are low-rate runs. The ratio 2²⁰ / 10⁶ = 1.0486 points at a binary-versus-decimal conversion between the `iperf` command line and the table, not at a real excess.
 
-The rows at about 104% (up to 104.85%) are also worth a remark: they are the low-rate runs, where the measured flow exceeds what was requested. The ratio 2²⁰ / 10⁶ is 1.0486, which points to a binary-versus-decimal megabit conversion between the `iperf` command line and the table, rather than to a real excess.
+## Reproducing the benchmarks
 
-## Resource Considerations
+See the [test table](CONTRIBUTING.md#tests). Use `--release`, the interface that carries your multicast route, and a `net.core.rmem_max` large enough for the test.
 
-> [!NOTE]
-> Enabling the `metrics-exporter` feature adds overhead and can reduce measured performance. Its use is discouraged in environments that don't require this visibility — especially when running against a large number of providers under heavy network load, close to hardware saturation.
+```bash
+export NBD_TEST_INTERFACE=eth0
 
-> [!NOTE]
-> The internal latency tests above use in-memory sinks (`BenchSink`, `IPerfSink`), which bypass the Kafka egress. This includes the `ManagedProducer` that wraps the Kafka producer in production: it performs one lock-free `ArcSwap` load for every submitted message, and runs a supervisor task and a producer-reaper thread in the background. Only an end-to-end test exercises that path.
+sudo sysctl -w net.core.rmem_max=2097152
+cargo test --release --test multi_channel_stress -- --nocapture
+
+# Build first, so that the listeners are up when iperf starts. They listen
+# for 5 minutes on 239.255.0.1 to .5, ports 20001 to 20005.
+sudo sysctl -w net.core.rmem_max=262144000
+cargo test --release --no-run --test multi_channel_iperf_stress
+cargo test --release --test multi_channel_iperf_stress -- --nocapture &
+sleep 2
+for i in 1 2 3 4 5; do
+    iperf -c 239.255.0.$i -u -p $((20000 + i)) -b 100M -l 1300 -t 280 -T 1 &
+done
+wait
+```
+
+- Other rows of the tables come from editing `STRESS_TEST_CHANNEL_COUNT` and `STRESS_TEST_FRQ_MICROS` in the tests, and the `iperf` bitrate.
+- Nominal rates aren't always reached: `spike` asks for 1 MHz and delivered about 100 kHz on a 2-core VM. The printed `Flow` is what counts.
+- The benchmarks run on Tokio's single-threaded test runtime, while the daemon uses the multi-threaded one. In `multi_channel_stress`, emitters and listeners share one thread.
+- `IPerfSink` compares the clocks of sender and receiver. With a remote `iperf`, latencies are only as good as the synchronization of the two hosts, and a sender ahead of the receiver gets its packets rejected.
+- With `metrics-exporter`, `multi_channel_iperf_stress` also serves metrics on `127.0.0.1:9000`.

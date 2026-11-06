@@ -2,48 +2,62 @@
 //!
 //! This module implements a "parse, don't validate" approach:
 //!
-//! 1. **Stage 1 — Deserialization**: Raw TOML is deserialized into permissive intermediate
+//! 1. **Stage 1 — Deserialization**: Raw TOML is deserialized into strict intermediate
 //!    structs ([`RawConfig`], [`RawProviderConfig`], etc.) where most fields are `Option<T>`.
 //!
 //! 2. **Stage 2 — Validation & Transformation**: The raw structs are converted into
 //!    validated, strongly-typed runtime structs ([`Config`], [`ProviderConfig`], etc.)
-//!    via `TryFrom` implementations. Missing fields receive sensible defaults with
-//!    diagnostic logging; invalid values produce descriptive [`NbdError::Config`] errors.
+//!    via `TryFrom` implementations. A missing optional field receives a default with
+//!    diagnostic logging; an invalid value is logged at `error` level and produces an
+//!    [`NbdError::Config`]. **An invalid value is never replaced by a default.**
 //!
 //! ## Validation rules
 //!
-//! - Multicast group addresses are verified via `IpAddr::is_multicast()`
-//! - IPv4/IPv6 family consistency between group and interface is enforced
-//! - Kafka topic names are checked against `[a-zA-Z0-9._-]{1,254}`; a missing, empty, too long or
-//!   invalid topic is **replaced by `nbd-connector`** and reported with an error log, it does not
-//!   stop the daemon
-//! - Port numbers warn on well-known (< 1024) and ephemeral (> 49151) ranges
-//! - `message_size` is capped at the maximum UDP datagram size (65,507 bytes), which bounds the
-//!   receive buffer allocated for each provider; `0` is replaced by the default, and a value bigger
-//!   than `socket_buffer_size` triggers a warning (the value is kept)
-//! - Kafka broker addresses are resolved via DNS; a failure is logged but does not stop the
-//!   daemon, the connectivity check made at startup is what catches an unreachable broker
-//! - Metrics listener interfaces are probed via ephemeral UDP socket binding
+//! - Multicast group addresses are verified via `IpAddr::is_multicast()`, and two providers cannot
+//!   share a group and a port
+//! - Kafka topic names are required and checked against `[a-zA-Z0-9._-]{1,249}`, `.` and `..` being
+//!   refused
+//! - Ports are required and cannot be `0`. The well-known (< 1024) and ephemeral (> 49151) ranges
+//!   are reported at `info` level
+//! - Interfaces are required: a name that must exist on Linux, a non-zero index elsewhere, see
+//!   [`Interface`]
+//! - `nbd.socket_buffer_size` goes from `1` byte to 1 GiB. Whether the kernel grants it is checked
+//!   when the sockets are created, not here
+//! - Kafka broker addresses are resolved via DNS, and a failure is an error: `<ip>:<port>` or
+//!   `<hostname>:<port>`, a single address
+//! - `kafka.connection_timeout`, `kafka.recovery_timeout`, `kafka.message_retries`,
+//!   `kafka.queue_size` and `kafka.queue_weight` cannot be `0`
+//! - `kafka.message_timeout` goes from `1` to `300 000` ms, and values below `10` ms trigger a
+//!   warning
+//! - `kafka.recovery_timeout` defaults to `600 000` ms (10 minutes), and values below `10 000` ms
+//!   trigger a warning
 //! - `kafka.acks` is validated against the set `{all, -1, 0, 1}`
-//! - `kafka.compression` is validated against `{none, lz4, gzip, snappy, zstd}`
-//! - `kafka.recovery_timeout` defaults to `600 000` ms (10 minutes), `0` is replaced by that default
-//!   and values below `10 000` ms trigger a warning
-//! - `kafka.parallel_requests` is capped at 5 when `kafka.idempotence = true`
-//! - `kafka.idempotence` is automatically forced to `false` when `kafka.acks` ∉ `{all, -1}`
+//! - `kafka.compression` is validated against `{none, lz4, gzip, snappy}`
+//! - `kafka.idempotence` defaults to `true`, or to `false` when `kafka.acks` ∉ `{all, -1}`, in which
+//!   case setting it to `true` is an error
+//! - `kafka.parallel_requests` goes from `1` to `5` with idempotence, and must be at least `1`
+//!   without it
 //! - TLS CA, certificate and key files are validated for existence, and the certificate and the key
 //!   must come as a pair (feature `kafka-tls`)
-//! - Kerberos keytab files are validated for existence (feature `kafka-auth-gssapi`)
-//! - OAuth token endpoint URLs warn if not using HTTPS (feature `kafka-auth-oauth`)
+//! - Kerberos keytab files are validated for existence and must be absolute paths without shell
+//!   metacharacters, and the principal is limited to a safe alphabet, since `librdkafka` passes
+//!   them to `kinit` through a shell. The service name follows the same alphabet (feature
+//!   `kafka-auth-gssapi`)
 //! - `security.protocol` is automatically derived from `tls`/`auth` presence:
 //!   `plaintext` | `ssl` | `sasl_plaintext` | `sasl_ssl`
+//! - `kafka.auth` without `kafka.tls`, and an OAuth token endpoint URL that is not HTTPS (feature
+//!   `kafka-auth-oauth`), are refused unless `kafka.allow_insecure_transport` is set
+//! - Metrics listener interfaces are required, probed via ephemeral UDP socket binding, and refused
+//!   unless they are loopback addresses or `metrics.allow_remote_metrics` is set
+//!
+//! What this validation cannot see fails later: a `kafka.linger` that is not lower than
+//! `kafka.message_timeout` is refused by `librdkafka` when the client is created.
 //!
 //! ## Unknown keys
 //!
-//! `[kafka]` and all its sub-sections (`[kafka.tls]`, `[kafka.auth]`, ...) reject unknown keys: a
-//! typo is a configuration error. The other sections (`[nbd]`, `[metrics]`, `[[provider]]`) and the
-//! top level of the file **ignore them**, so a misspelled key there is silently replaced by its
-//! default value. The `provider` key is required: a file without any `[[provider]]` section is
-//! refused.
+//! Every section, and the top level of the file, rejects unknown keys: a typo is a configuration
+//! error. That includes `[metrics]` when the `metrics-exporter` feature is disabled. The `provider`
+//! and `kafka` keys are required.
 //!
 //! ## Secret handling
 //!
@@ -59,19 +73,19 @@
 //! by [`ProducerConfig::erase_secrets`] once the Kafka producer is built. Copies owned by
 //! dependencies cannot be erased from here, see the documentation of those methods.
 //!
-//! File permission enforcement ([`check_secrets`]) runs before [`Config::try_from`]: on Unix,
-//! any file containing a literal secret or referenced as a secrets file must have permissions
-//! `0o600` (owner read/write only); NBD returns [`NbdError::Config`] and refuses to start
-//! otherwise. On non-Unix platforms the check emits a warning instead. The check covers the
-//! `password`, `key_password` and `client_secret` sources, the TLS `key_file` and the Kerberos
-//! `keytab`; the `username` sources and the public files (`ca_file`, `cert_file`) are not checked.
+//! File permission enforcement ([`check_secrets`]) runs before [`Config::try_from`]: on Unix, the
+//! files that hold secrets must give no access to the group and the others, the other files of the
+//! configuration must give them no write access, none of them can be a symbolic link, and their
+//! parent directory must not be writable by the group and the others. NBD returns
+//! [`NbdError::Config`] and refuses to start otherwise. On non-Unix platforms the check emits a
+//! warning instead.
 //!
 //! ## Security posture
 //!
-//! [`ProducerConfig::posture`] extracts the part of the Kafka configuration that defines the
-//! security of the connection (broker, TLS files, SASL mechanism) into a [`SecurityPosture`], which
-//! holds no secret. The Kafka producer recovery compares the posture of the configuration it just
-//! re-read with the one in force, and refuses a downgrade. See [`SecurityPosture::check_against`].
+//! [`ProducerConfig::posture`] extracts every non-secret setting of the Kafka configuration into a
+//! [`SecurityPosture`]. The Kafka producer recovery compares the posture of the configuration it
+//! just re-read with the one recorded at startup, and refuses any difference. See
+//! [`SecurityPosture::check_against`].
 
 use serde::Deserialize;
 
@@ -95,19 +109,25 @@ use tracing::{debug, error, info, warn};
 
 use crate::errors::{NbdError, parse_toml_error};
 
+/// Largest UDP payload a provider accepts, in bytes: the IPv6 limit, which covers the 65,507 bytes
+/// of IPv4.
 pub const MAX_UDP_PAYLOAD: usize = 65_527;
 
 /// Headroom multiplier for initial buffer allocation.
 ///
-/// The receive buffer is allocated as `message_size * BUFFER_RESERVATION_HEADROOM`
-/// bytes to reduce re-allocation frequency under sustained packet load.
+/// The receive buffer is allocated as `MAX_UDP_PAYLOAD * BUFFER_RESERVATION_HEADROOM`
+/// bytes (6.55 MB per provider) to reduce re-allocation frequency under sustained packet load.
 pub const BUFFER_RESERVATION_HEADROOM: usize = 100;
 
+/// Largest accepted `nbd.socket_buffer_size`, in bytes (1 GiB).
 const MAX_SOCKET_BUFFER: usize = 1 << 30;
 
+/// Upper bound of the `librdkafka` integer properties `queue.buffering.max.messages` and
+/// `queue.buffering.max.kbytes`.
 const INT_MAX: u32 = 2_147_483_647;
 
-/// Minimum delay, in seconds, between two logged delivery failures for the same topic.
+/// Minimum delay, in seconds, between two logged delivery failures for the same topic, and between
+/// two logged socket errors for the same provider.
 pub const LOG_THRESHOLD: u64 = 1;
 
 /// Raw, unvalidated configuration deserialized directly from a TOML file.
@@ -123,7 +143,7 @@ pub struct RawConfig {
     pub kafka: RawProducerConfig,
     /// The `[nbd]` section. When it is absent, every parameter takes its default value.
     pub nbd: Option<RawNbdConfig>,
-    /// The `[metrics]` section. When it is absent, every parameter takes its default value.
+    /// The `[metrics]` section. When it is absent, the exporter is not started.
     #[cfg(feature = "metrics-exporter")]
     pub metrics: Option<RawMetricsConfig>,
 }
@@ -132,14 +152,21 @@ impl RawConfig {
     /// Reads and parses a TOML configuration file.
     ///
     /// The text read from the file is zeroized as soon as it has been parsed, successfully or not.
-    /// A parse error is returned as [`NbdError::Toml`]: its message shows the offending line of the
-    /// file, which may hold a literal secret, and the error itself keeps a copy of the whole file
-    /// text that is not zeroized.
+    ///
+    /// `safe_output` decides what a parse error reveals. With `true`, it is returned as an
+    /// [`NbdError::Config`] that gives the line, the column and the message of the error, without
+    /// the text of the file. With `false`, it is returned as [`NbdError::Toml`], whose message shows
+    /// the offending line of the file, which may hold a literal secret. The daemon always uses
+    /// `true`, and `--check-config-file` only uses `false` when its output is a terminal.
+    ///
+    /// In both cases, the message of a type error quotes the value it refused, and the error
+    /// returned by the `toml` crate holds a copy of the whole file text that is not zeroized.
     ///
     /// # Errors
     ///
-    /// - [`NbdError::Config`] when the file cannot be read;
-    /// - [`NbdError::Toml`] when its content is not valid.
+    /// - [`NbdError::Config`] when the file cannot be read, or when its content is not valid and
+    ///   `safe_output` is `true`;
+    /// - [`NbdError::Toml`] when its content is not valid and `safe_output` is `false`.
     pub fn from_path(path: &PathBuf, safe_output: bool) -> Result<RawConfig, NbdError> {
         match std::fs::read_to_string(path) {
             Ok(mut content) => {
@@ -164,13 +191,13 @@ impl RawConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawProviderConfig {
-    /// Kafka topic of the stream. Defaults to `nbd-connector`, which also replaces an invalid name.
+    /// Kafka topic of the stream. Required: 1 to 249 characters among `[a-zA-Z0-9._-]`.
     pub topic: Option<String>,
     /// Multicast group to join. Required, and must be a multicast address.
     pub group: IpAddr,
-    /// UDP port to bind. Unset or `0` is replaced by `20000` plus the index of the provider.
+    /// UDP port to bind. Required, and cannot be `0`.
     pub port: Option<u16>,
-    /// Local interface to join the group on. Defaults to any interface (`0.0.0.0` or `0`).
+    /// Local interface to receive the group on. Required, see [`Interface`].
     pub interface: Option<Interface>,
 }
 
@@ -183,16 +210,17 @@ pub struct RawProducerConfig {
     /// Timeout, in milliseconds, of the connectivity check made at startup. Default `2000`.
     pub connection_timeout: Option<u64>,
     /// Maximum time, in milliseconds, spent trying to recreate a faulted Kafka producer.
-    /// Unset or `0` is replaced by the default, see [`ProducerConfig::recovery_timeout`].
+    /// `0` is refused, see [`ProducerConfig::recovery_timeout`] for the default.
     pub recovery_timeout: Option<u64>,
-    /// Delivery timeout of a message, in milliseconds (`message.timeout.ms`). Default `100`.
+    /// Delivery timeout of a message, in milliseconds (`message.timeout.ms`), from `1` to `300000`.
+    /// Default `100`.
     pub message_timeout: Option<u64>,
-    /// Number of delivery retries (`message.send.max.retries`). `0` is replaced by `2`.
+    /// Number of delivery retries (`message.send.max.retries`). Default `2`, and `0` is refused.
     pub message_retries: Option<u16>,
-    /// Compression codec (`compression.type`): `none`, `lz4` (default), `gzip`, `snappy` or `zstd`.
+    /// Compression codec (`compression.type`): `none` (default), `lz4`, `gzip` or `snappy`.
     pub compression: Option<String>,
-    /// Idempotent producer (`enable.idempotence`). Default `true`, forced to `false` when `acks` is
-    /// neither `all` nor `-1`.
+    /// Idempotent producer (`enable.idempotence`). Defaults to `true` when `acks` is `all` or `-1`,
+    /// and to `false` otherwise, in which case `true` is refused.
     pub idempotence: Option<bool>,
     /// Batching delay, in milliseconds (`linger.ms`). Default `1`.
     pub linger: Option<u16>,
@@ -201,6 +229,8 @@ pub struct RawProducerConfig {
     /// Maximum number of messages in the producer queue (`queue.buffering.max.messages`).
     /// Default `100000`.
     pub queue_size: Option<u32>,
+    /// Maximum total size of the producer queue, in KiB (`queue.buffering.max.kbytes`).
+    /// Default `100000`.
     pub queue_weight: Option<u32>,
     /// Maximum number of in-flight requests per connection
     /// (`max.in.flight.requests.per.connection`). Default `5`, which is also the maximum when
@@ -210,6 +240,8 @@ pub struct RawProducerConfig {
     pub tls: Option<TlsConfig>,
     /// The `[kafka.auth]` section.
     pub auth: Option<RawAuthConfig>,
+    /// Accepts `[kafka.auth]` without `[kafka.tls]`, and an OAuth token endpoint that is not HTTPS.
+    /// Default `false`.
     pub allow_insecure_transport: Option<bool>,
 }
 
@@ -217,7 +249,7 @@ pub struct RawProducerConfig {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RawNbdConfig {
-    /// Receive buffer of each multicast socket, in bytes. Default `204800`. `0` is refused.
+    /// Receive buffer of each multicast socket, in bytes, from `1` to 1 GiB. Default `204800`.
     pub socket_buffer_size: Option<usize>,
     /// Log level. Default `info`.
     pub verbosity: Option<VerbosityLevels>,
@@ -228,17 +260,19 @@ pub struct RawNbdConfig {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RawMetricsConfig {
-    /// Interface the HTTP listener binds to.
+    /// Interface the HTTP listener binds to. Required: an address of the host, which must be a
+    /// loopback address unless `allow_remote_metrics` is set.
     pub interface: Option<IpAddr>,
     /// Port of the HTTP listener. Default `9000`.
     pub port: Option<u16>,
+    /// Accepts an `interface` that is not a loopback address. Default `false`.
     pub allow_remote_metrics: Option<bool>,
 }
 
 /// Validated, strongly-typed runtime configuration.
 ///
 /// Constructed from [`RawConfig`] via `Config::try_from()`. All fields have been validated
-/// and missing values replaced with documented defaults.
+/// and missing optional values replaced with documented defaults.
 pub struct Config {
     /// The multicast streams to ingest, in the order of the `[[provider]]` sections.
     pub provider: Vec<ProviderConfig>,
@@ -246,7 +280,7 @@ pub struct Config {
     pub kafka: ProducerConfig,
     /// The daemon-level configuration.
     pub nbd: NbdConfig,
-    /// The metrics exporter configuration.
+    /// The metrics exporter configuration. `None` when the exporter must not be started.
     #[cfg(feature = "metrics-exporter")]
     pub metrics: Option<MetricsConfig>,
 }
@@ -299,9 +333,7 @@ impl TryFrom<RawConfig> for Config {
         let metrics: Option<MetricsConfig> = match raw_config.metrics {
             Some(raw_metrics_config) => Some(MetricsConfig::try_from(raw_metrics_config)?),
             None => {
-                warn!(
-                    "The `metrics` section is not set. Prometheus metrics are disabled."
-                );
+                warn!("The `metrics` section is not set. Prometheus metrics are disabled.");
 
                 None
             }
@@ -328,7 +360,7 @@ pub struct ProviderConfig {
     pub group: IpAddr,
     /// UDP port to bind.
     pub port: u16,
-    /// Local interface the group is joined on, of the same IP family as the group.
+    /// Local interface the group is received on.
     pub interface: Interface,
 }
 
@@ -495,8 +527,8 @@ impl ProviderConfig {
 /// The `security_protocol` field is derived automatically:
 /// - `plaintext` — neither TLS nor auth configured
 /// - `ssl` — TLS only (feature `kafka-tls`)
-/// - `sasl_plaintext` — auth only, no TLS
-/// - `sasl_ssl` — TLS + auth (feature `kafka-tls` + `kafka-auth-*`)
+/// - `sasl_plaintext` — auth only, no TLS (requires `allow_insecure_transport`)
+/// - `sasl_ssl` — TLS + auth (feature `kafka-tls`, and `kafka-auth-*` for these mechanisms)
 ///
 /// Secret fields (`tls.key_password`, `auth` credentials) are stored as
 /// [`secrecy::SecretString`], which is zeroized when dropped. They are also erased explicitly with
@@ -518,8 +550,9 @@ pub struct ProducerConfig {
     /// the default is `600 000` (10 minutes).
     ///
     /// Building a producer does not wait for the broker, so this budget is consumed by failures of
-    /// the rebuild itself (unreadable or invalid configuration, unresolvable secrets, rejected
-    /// TLS/SASL material), not by an unreachable broker. See [`ManagedProducer`](crate::ManagedProducer).
+    /// the rebuild itself (unreadable or invalid configuration, unresolvable broker address or
+    /// secrets, rejected TLS/SASL material), not by an unreachable broker. See
+    /// [`ManagedProducer`](crate::ManagedProducer).
     pub recovery_timeout: u64,
     /// Delivery timeout of a message, in milliseconds (`message.timeout.ms`).
     pub message_timeout: u64,
@@ -535,6 +568,7 @@ pub struct ProducerConfig {
     pub acks: String,
     /// Maximum number of messages in the producer queue (`queue.buffering.max.messages`).
     pub queue_size: u32,
+    /// Maximum total size of the producer queue, in KiB (`queue.buffering.max.kbytes`).
     pub queue_weight: u32,
     /// Maximum number of in-flight requests per connection
     /// (`max.in.flight.requests.per.connection`).
@@ -546,6 +580,7 @@ pub struct ProducerConfig {
     pub tls: Option<TlsConfig>,
     /// SASL settings. Absent when the connection is not authenticated.
     pub auth: Option<AuthConfig>,
+    /// Whether `auth` is accepted without `tls`, and an OAuth token endpoint that is not HTTPS.
     pub allow_insecure_transport: bool,
 }
 
@@ -587,11 +622,10 @@ impl ProducerConfig {
         });
     }
 
-    /// Extracts the [`SecurityPosture`] of this configuration: the broker, the TLS files and the
-    /// SASL mechanism.
+    /// Extracts the [`SecurityPosture`] of this configuration: all its settings except the secrets.
     ///
-    /// The posture holds no secret, only paths and the name of the mechanism, so it can be kept
-    /// and logged freely, and it stays valid after [`erase_secrets`](ProducerConfig::erase_secrets).
+    /// The posture holds no secret, so it can be kept and logged freely, and it stays valid after
+    /// [`erase_secrets`](ProducerConfig::erase_secrets).
     pub fn posture(&self) -> SecurityPosture {
         let mut posture: BTreeMap<&'static str, String> = BTreeMap::new();
 
@@ -670,6 +704,24 @@ impl ProducerConfig {
         SecurityPosture { posture }
     }
 
+    /// Translates this configuration into a `librdkafka` client configuration.
+    ///
+    /// Applies, in this order:
+    ///
+    /// 1. the TLS settings (`ssl.*`), when `tls` is set, with the verification of the broker
+    ///    certificate and of its hostname enforced;
+    /// 2. `security.protocol`;
+    /// 3. the SASL settings, for the configured authentication mechanism;
+    /// 4. the broker address and the producer tuning.
+    ///
+    /// Secrets are exposed only to fill the client configuration. The temporary copies this
+    /// function creates (TLS key password, OAuth client secret) are zeroized right after use, but
+    /// the strings of the returned [`ClientConfig`] are plain `String`s, released without being
+    /// zeroized.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NbdError::Config`] when a secret cannot be resolved.
     pub fn configure(&self) -> Result<ClientConfig, NbdError> {
         let mut kafka_config = ClientConfig::new();
 
@@ -755,6 +807,16 @@ impl ProducerConfig {
         Ok(kafka_config)
     }
 
+    /// Checks that `librdkafka` accepts the settings of this configuration, without creating a
+    /// client and without contacting the broker.
+    ///
+    /// This doesn't cover what `librdkafka` only verifies when a client is created, such as
+    /// `linger.ms` being lower than `message.timeout.ms`, or the validity of the TLS material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NbdError::Config`] when a secret cannot be resolved, and [`NbdError::Kafka`] when
+    /// `librdkafka` rejects a setting.
     pub fn check(&self) -> Result<(), NbdError> {
         self.configure()?.create_native_config()?;
         Ok(())
@@ -888,9 +950,7 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
         match raw_producer_config.message_retries {
             Some(value) => {
                 if value < 1 {
-                    error!(
-                        "The `kafka.message_retries` parameter cannot be 0. It was increased to the default value of `2`."
-                    );
+                    error!("The `kafka.message_retries` parameter cannot be 0.");
                     errors.push(String::from("invalid message retries"));
                 } else {
                     debug!("The `kafka.message_retries` parameter is configured correctly.");
@@ -1417,8 +1477,7 @@ impl TryFrom<RawNbdConfig> for NbdConfig {
 /// Validated Prometheus metrics exporter configuration (HTTP listener).
 #[cfg(feature = "metrics-exporter")]
 pub struct MetricsConfig {
-    /// Interface the HTTP listener binds to. An address that does not belong to the host is
-    /// replaced by `127.0.0.1`.
+    /// Interface the HTTP listener binds to: an address of the host.
     pub interface: IpAddr,
     /// Port of the HTTP listener.
     pub port: u16,
@@ -1499,7 +1558,7 @@ impl TryFrom<RawMetricsConfig> for MetricsConfig {
 /// Log verbosity level for the daemon.
 ///
 /// Deserialized from lowercase strings in TOML (e.g. `"info"`, `"debug"`).
-/// Controls the `tracing` filter level at runtime via dynamic reloading.
+/// Sets the level of the `tracing` filter once, at startup.
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VerbosityLevels {
@@ -1527,13 +1586,16 @@ impl fmt::Display for VerbosityLevels {
     }
 }
 
-/// Network interface binding for multicast group membership.
+/// Network interface a provider receives its multicast group on.
 ///
-/// Uses serde untagged deserialization so the TOML value is automatically
-/// parsed as either an IPv4 address string or an IPv6 interface index integer.
+/// Always a string in the TOML file, and built with [`Interface::try_from`]:
 ///
-/// - [`V4`](Interface::V4) — IPv4 address of the local interface (e.g. `"192.168.1.10"` or `"0.0.0.0"` for any).
-/// - [`V6`](Interface::V6) — IPv6 scope/interface index (e.g. `0` for any, or `2` for a specific NIC).
+/// - on Linux, the name of the interface (e.g. `"eth0"`);
+/// - on other systems, its numeric index (e.g. `"2"`).
+///
+/// The value is limited to 15 characters among `[a-zA-Z0-9._-]`. `.`, `..` and IP addresses are
+/// refused. Whether the interface exists is checked by the validation of the configuration, with
+/// [`index`](Interface::index). The default interface (index `0`) is refused there as well.
 #[derive(Deserialize, Clone)]
 #[serde(try_from = "String")]
 pub struct Interface(String);
@@ -1571,10 +1633,19 @@ impl TryFrom<String> for Interface {
 }
 
 impl Interface {
+    /// The interface as written in the configuration.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Returns the index of the interface.
+    ///
+    /// On Linux, it is read from `/sys/class/net/<name>/ifindex`. On other systems, the value is the
+    /// index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NbdError::Socket`] when the interface doesn't exist or its index cannot be read.
     pub fn index(&self) -> Result<u32, NbdError> {
         #[cfg(target_os = "linux")]
         {
@@ -1616,6 +1687,9 @@ impl Interface {
     }
 }
 
+/// Whether a Kerberos name sticks to a safe alphabet: at most 255 characters among
+/// `[a-zA-Z0-9._/@-]`, not starting with `-`. `librdkafka` passes the principal to `kinit` through
+/// a shell.
 #[cfg(feature = "kafka-auth-gssapi")]
 fn check_krb_name(name: &str) -> bool {
     !name.is_empty()
@@ -1714,8 +1788,7 @@ pub struct Credentials {
 
 /// SASL mechanism of a username and password authentication.
 ///
-/// Listed from the weakest to the strongest, which is also the order
-/// [`SecurityPosture::check_against`] uses to tell a downgrade from an upgrade.
+/// Listed from the weakest to the strongest.
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 pub enum SecurityMechanism {
     /// `PLAIN`: the password is sent as is, which makes TLS essential.
@@ -1767,8 +1840,9 @@ pub struct OAuthConfigWrapper {
 pub struct Kerberos {
     /// Principal NBD authenticates as, as `<name>@<REALM>` (`sasl.kerberos.principal`).
     pub principal: String,
-    /// Keytab file of the principal (`sasl.kerberos.keytab`). It must exist, and its permissions
-    /// are checked by [`check_secrets`].
+    /// Keytab file of the principal (`sasl.kerberos.keytab`). It must exist and be an absolute path
+    /// without `"`, `$`, `` ` ``, `\` or a line break, and its permissions are checked by
+    /// [`check_secrets`].
     pub keytab: PathBuf,
     /// Kerberos service name of the brokers, usually `kafka` (`sasl.kerberos.service.name`).
     pub service_name: String,
@@ -1780,7 +1854,7 @@ pub struct Kerberos {
 #[serde(deny_unknown_fields)]
 pub struct OAuth {
     /// Token endpoint of the identity provider (`sasl.oauthbearer.token.endpoint.url`). A URL that
-    /// is not HTTPS is reported with a warning.
+    /// is not HTTPS is refused, unless `kafka.allow_insecure_transport` is set.
     pub token_endpoint_url: String,
     /// Client identifier (`sasl.oauthbearer.client.id`). Must not be empty.
     pub client_id: String,
@@ -1793,6 +1867,12 @@ pub struct OAuth {
     pub extensions: Option<String>,
 }
 
+/// Checks one file of the configuration: it must not be a symbolic link (the last component of the
+/// path only), its immediate parent directory must not be writable by the group and the others, and
+/// the file itself must give the group and the others no access if `is_secret`, no write access
+/// otherwise.
+///
+/// The owner of the file is not checked.
 #[cfg(unix)]
 fn check_file_permissions(path: &std::path::Path, is_secret: bool) -> Result<(), NbdError> {
     use std::os::unix::fs::PermissionsExt;
@@ -1841,6 +1921,7 @@ fn check_file_permissions(path: &std::path::Path, is_secret: bool) -> Result<(),
     Ok(())
 }
 
+/// Permissions cannot be verified on this platform: emits a warning.
 #[cfg(not(unix))]
 fn check_file_permissions(path: &std::path::Path, _is_secret: bool) -> Result<(), NbdError> {
     warn!(
@@ -1850,13 +1931,22 @@ fn check_file_permissions(path: &std::path::Path, _is_secret: bool) -> Result<()
     Ok(())
 }
 
-/// Validates file permissions for all secret-bearing paths in the Kafka configuration.
+/// Validates the permissions of the files of the configuration.
 ///
-/// Must be called **before** [`Config::try_from`]. On Unix, any file that either
-/// *contains* a literal secret (triggering a check on `config_path` itself) or is
-/// *referenced* as a secrets file must have permissions `0o600` (owner read/write only).
-/// Returns [`NbdError::Config`] and prevents startup if any file is group- or
-/// world-readable. On non-Unix platforms the check emits a warning instead.
+/// Must be called **before** [`Config::try_from`]. On Unix:
+///
+/// - `config_path`, when it holds a literal `password`, `key_password` or `client_secret`, the
+///   `{ file = ... }` sources of these three parameters, the TLS key and the Kerberos keytab must
+///   give no access to the group and the others;
+/// - `config_path` otherwise, the CA and the client certificate must give them no write access;
+/// - none of them can be a symbolic link, and their parent directory must not be writable by the
+///   group and the others.
+///
+/// The `{ file = ... }` source of a `username` is not checked, and neither is the owner of the
+/// files. The TLS files are only checked with the `kafka-tls` feature.
+///
+/// Returns [`NbdError::Config`] and prevents startup on a violation. On non-Unix platforms the
+/// check emits a warning instead.
 pub fn check_secrets(
     kafka_config: &RawProducerConfig,
     config_path: &std::path::Path,
@@ -1924,28 +2014,29 @@ pub fn check_secrets(
 /// A TOML-deserialisable secret value accepted in three forms:
 ///
 /// ```toml
-/// # Inline literal — config file must be chmod 600 on Unix
+/// # Inline literal — on Unix, the config file must give no access to the group and the others
 /// password = "my-secret"
 ///
-/// # Shell environment variable resolved at startup
+/// # Environment variable of the process, whose value cannot change until a restart
 /// password = { env = "MY_SECRET_VAR" }
 ///
-/// # Path to a secrets file — file must be chmod 600 on Unix
+/// # Path to a secrets file, read again at every producer rebuild — on Unix, it must give no
+/// # access to the group and the others, except for a `username`
 /// password = { file = "/run/secrets/my_secret" }
 /// ```
 ///
-/// Resolved values are wrapped in [`secrecy::SecretString`], which prevents
-/// accidental `Debug`/`Display` formatting of secret material at compile time.
+/// Resolved values are wrapped in [`secrecy::SecretString`]: formatting one with `Display` does not
+/// compile, and `Debug` prints `[REDACTED]`.
 /// Use [`SecretSource::resolve`] to obtain the underlying [`secrecy::SecretString`].
 #[derive(Debug, Deserialize, Clone)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum SecretSource {
     /// The secret is read from the environment variable `env`.
     Env {
         /// Name of the environment variable.
         env: String,
     },
-    /// The secret is read from the file `file` (trailing whitespace is trimmed).
+    /// The secret is read from the file `file` (surrounding whitespace is trimmed).
     File {
         /// Path of the file.
         file: PathBuf,
@@ -2020,65 +2111,51 @@ impl SecretSource {
     }
 }
 
-/// The security-relevant part of a Kafka configuration: where it connects, with which TLS files
-/// and with which SASL mechanism. It holds no secret.
+/// The non-secret settings of a Kafka configuration, as recorded at startup.
 ///
 /// Obtained with [`ProducerConfig::posture`]. The Kafka producer recovery (see
-/// [`producer_factory`](crate::producer_factory)) keeps the posture of the running producer and
-/// compares it, with [`check_against`](SecurityPosture::check_against), with the one of the
-/// configuration it re-reads from the file before it rebuilds the producer. This turns a silent
-/// downgrade of the connection, made by editing the file while the daemon runs, into a refusal.
+/// [`producer_factory`](crate::producer_factory)) keeps the posture of the startup configuration
+/// and compares it, with [`check_against`](SecurityPosture::check_against), with the one of the
+/// configuration it re-reads from the file before it rebuilds the producer. This turns a change of
+/// the connection, made by editing the file while the daemon runs, into a refusal.
 ///
 /// # What a posture covers
 ///
-/// - the broker address (`kafka.broker`);
+/// - the broker address and `security_protocol`, which reflects the presence of `[kafka.tls]` and
+///   `[kafka.auth]`;
+/// - `allow_insecure_transport`;
+/// - the tuning: timeouts, retries, compression, idempotence, linger, acks, queue limits and
+///   parallel requests;
 /// - the **paths** of the TLS files (`kafka.tls.ca_file`, `cert_file`, `key_file`);
-/// - the **name** of the SASL mechanism, or its absence.
+/// - the **name** of the SASL mechanism;
+/// - the Kerberos principal, keytab path and service name, and the OAuth token endpoint, client
+///   identifier, scope and extensions.
 ///
 /// # What it does not cover
 ///
-/// - the content of the TLS files, nor the key password: a file replaced by another one at the same
-///   path is not detected;
-/// - the SASL credentials (username, password, client secret, principal, keytab): a change of
-///   identity is not detected;
-/// - everything else in `[kafka]` (acknowledgements, idempotence, compression, ...).
+/// - the secrets: SASL username and password, OAuth client secret, TLS key password;
+/// - the content of the TLS, keytab and secret files: a file replaced by another one at the same
+///   path is not detected.
+///
+/// These are left out on purpose, so that they can be rotated without a restart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityPosture {
     posture: BTreeMap<&'static str, String>,
 }
 
 impl SecurityPosture {
-    /// Compares a `candidate` posture with this one, which is the reference, and refuses what
-    /// weakens the connection.
+    /// Compares a `candidate` posture with this one, which is the reference, and refuses any
+    /// difference, in either direction: an improvement is refused like a downgrade.
     ///
-    /// **Refused** (an error is logged for each, and [`NbdError::Config`] is returned listing them):
+    /// When a setting differs, an error listing the names of these settings is logged, and
+    /// [`NbdError::Config`] is returned. Their values are not logged. Everything a posture does not
+    /// cover, such as a change of SASL credentials, is accepted without any message.
     ///
-    /// - the `kafka.tls` section disappeared;
-    /// - the CA file path changed;
-    /// - the client certificate or the client key, which the reference had, disappeared;
-    /// - the `kafka.auth` section disappeared;
-    /// - the SASL mechanism is weaker than the reference's, in this order, from the strongest:
-    ///   `GSSAPI` and `OAUTHBEARER` (same rank), `SCRAM-SHA-512`, `SCRAM-SHA-256`, `PLAIN`.
-    ///
-    /// **Accepted with a warning**: a `kafka.tls` section added or changed in a way that is not
-    /// refused (including other certificate or key paths), a stronger SASL mechanism, and a
-    /// different `kafka.broker`.
-    ///
-    /// **Accepted without any message**: everything a posture does not cover, such as a change of
-    /// SASL credentials, and a switch between mechanisms of the same rank (`GSSAPI` and
-    /// `OAUTHBEARER`).
-    ///
-    /// Note that the broker may change freely: the check protects the *level* of security of the
-    /// connection, not its destination. With TLS configured, the new broker must still present a
-    /// certificate issued by the same CA; without TLS, nothing verifies it.
-    ///
-    /// The reference is not modified: the caller decides to adopt the candidate as the new
-    /// reference once it has been used successfully, as [`producer_factory`](crate::producer_factory)
-    /// does.
+    /// The reference is not modified.
     ///
     /// # Errors
     ///
-    /// Returns [`NbdError::Config`] when at least one change is refused. Its message tells that the
+    /// Returns [`NbdError::Config`] when at least one setting differs. Its message tells that the
     /// changes can be applied by restarting NBD, since a startup trusts the file and has no
     /// reference to compare with.
     pub fn check_against(&self, candidate: &Self) -> Result<(), NbdError> {

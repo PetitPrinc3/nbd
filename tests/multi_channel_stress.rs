@@ -147,6 +147,8 @@ async fn multi_channel_stress_test() {
         .flat_map(|s| s.latencies.lock().unwrap().to_vec())
         .collect();
 
+    assert_ne!(total_received_messages, 0);
+
     show_report(
         &format!("{}-seconds-multi-stress-test", STRESS_TEST_DURATION_SECONDS),
         latencies,

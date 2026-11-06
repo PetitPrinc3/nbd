@@ -1,86 +1,118 @@
-# Contributing to Nothing But Data (NBD)
+# Contributing
 
-First off, thanks for taking the time to contribute! NBD is a "no-bullshit" daemon focused on sub-millisecond latency, strict security, and stability.
+NBD has a single maintainer, so reviews are best-effort. Changes should keep NBD's data path free of payload copies, keep the configuration failing closed, and stay compliant with the [ANSSI Secure Rust Guide](https://anssi-fr.github.io/rust-guide/).
 
-As a single-maintainer project, PR reviews and issue responses are best-effort. Please ensure your contributions align with the project's core principles: zero-copy data paths, strict ANSSI compliance, minimal unnecessary overhead, and very low latency.
+## Setup
 
-## Development Environment Setup
+The toolchain is selected by `rust-toolchain.toml`. The code must also build with Rust 1.95, the compiler of Ferrocene 26.05.
 
-1. **Rust Toolchain**: NBD is pinned to Rust **1.99.1**. Ensure you have `rustup` installed; the toolchain will be selected automatically via `rust-toolchain.toml`.
-2. **System Dependencies (Linux/macOS)**: You need a C/C++ compiler and `cmake` for `librdkafka` compilation (pulled via `rdkafka-sys`). Optionally:
-   - `libsasl2-dev` (Debian/Ubuntu) — required to build the `kafka-auth-gssapi` feature (Kerberos GSSAPI).
-   - `libcurl4-openssl-dev` (Debian/Ubuntu) — required to build the `kafka-auth-oauth` feature (OAuth 2.0/OIDC).
-3. **System Dependencies (Windows)**: Building `rdkafka-sys` with the `cmake-build` feature additionally requires Perl and NASM (for the bundled OpenSSL build) and the Visual Studio Build Tools (C++ workload). If `cmake` fails to locate a dependency, check the [`rust-rdkafka` build notes](https://github.com/fede1024/rust-rdkafka) first.
-4. **Testing Infrastructure**: A local Kafka broker (or Docker/Podman for `testcontainers`) is recommended for end-to-end testing. The end-to-end harness lives outside this repository (see [PERFORMANCE.md](PERFORMANCE.md#end-to-end)). The benchmarks of `tests/` use in-memory mock sinks (`BenchSink`, `IPerfSink`) and need no external broker.
+On Debian/Ubuntu:
 
-## Workflow and Quality Gates
+```bash
+sudo apt-get install -y cmake libssl-dev libsasl2-dev libcurl4-openssl-dev
+```
 
-Before submitting a Pull Request, you must ensure all CI/CD checks pass locally. We enforce strict quality gates:
+| Package | Needed by |
+|---|---|
+| `cmake`, a C/C++ compiler | `librdkafka` |
+| `libssl-dev` | `kafka-tls`, `kafka-auth-gssapi`, `kafka-auth-oauth` |
+| `libsasl2-dev` | `kafka-auth-gssapi`. At run time, Kerberos also needs `kinit` and `libsasl2-modules-gssapi-mit` |
+| `libcurl4-openssl-dev` | `kafka-auth-oauth` |
 
-### 1. Formatting
+On Windows, you need the Visual Studio Build Tools (C++ workload) and CMake. The CI doesn't build the TLS and SASL features there.
+
+## Checks
 
 ```bash
 cargo fmt
-```
-
-### 2. Linting
-
-We maintain a strict zero-warning policy. A quick local check:
-
-```bash
 cargo clippy --all-targets --all-features -- -D warnings
+cargo test --test config --all-features
+cargo test --doc --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --document-private-items
 ```
 
-The CI goes further and lints every combination of the optional features (`cargo install cargo-hack` first if you want to reproduce it):
+The CI goes further, on every combination of features and with the supply chain tools:
 
 ```bash
-cargo hack clippy --feature-powerset --all-targets -- -D warnings
-```
+cargo install --locked cargo-hack@0.6.45 cargo-audit@0.22.2 cargo-deny@0.20.2 cargo-vet@0.10.3 cargo-outdated@0.19.0
 
-The library and the daemon (`src/lib.rs`, `src/main.rs`) also deny, through `clippy`, the constructs that can panic or overflow silently: `unwrap`, `expect`, `panic!`, `unreachable!`, `todo!`, `unimplemented!`, unchecked arithmetic (`+`, `-`, `*`, `/`...), and unchecked indexing and string slicing. Use `Result` and `NbdError`, `.get()`, and checked or saturating operations instead. These lints are enforced by `clippy`, not by `cargo build`, and don't apply to the crates of `tests/`.
-
-### 3. Testing
-
-Run the fast checks below before every PR:
-
-```bash
-cargo test --test config --all-features   # configuration validity and secret handling
-cargo test --doc --all-features           # the examples of the API documentation
-cargo test --test simple_latency -- --nocapture   # latency smoke test
-cargo test --lib --all-features
-```
-
-A change to `config.rs`, `kafka.rs`, `providers.rs` or `sinks.rs` deserves a new test in `tests/` when it can be written without a broker.
-
-The suite also ships longer-running benchmarks (`stress`, `spike`, `multi_channel_stress`) and one that depends on an external `iperf` process (`multi_channel_iperf_stress`). These are **not** required to pass a PR — run them manually if your change touches the hot path (`providers.rs`, `sinks.rs`, `kafka.rs`):
-
-```bash
-cargo test --test stress -- --nocapture                   # 5 min sustained load
-cargo test --test spike -- --nocapture                    # 10 s burst
-cargo test --test multi_channel_stress -- --nocapture     # 5-channel concurrency
-```
-
-> **Heads up**: running a bare `cargo test --all-features` with no filter will attempt every test above, including the multi-minute stress tests and the `iperf`-dependent one. Expect it to take 10+ minutes and to fail unless `iperf` is already running separately.
-
-### 4. Supply Chain & Security Auditing
-
-We use `cargo-deny`, `cargo-audit` and `cargo-outdated` to enforce license, registry, freshness and vulnerability policies. The CI fails on any of them, an outdated dependency included:
-
-```bash
-cargo deny check
+cargo hack clippy --locked --feature-powerset --all-targets -- -D warnings
+cargo hack test --locked --feature-powerset --test config
 cargo audit
+cargo deny check
+cargo vet --locked
 cargo outdated --exit-code 1
 ```
 
-## Pull Request Process
+`src/` denies `unwrap`, `expect`, `panic!`, `unreachable!`, `todo!`, `unimplemented!`, unchecked arithmetic, and unchecked indexing and slicing. Use `NbdError`, `.get()`, and checked or saturating operations.
 
-1. Fork the repository and create a feature branch from `main`.
-2. If you introduce new features, write corresponding tests (unit or integration).
-3. Update the documentation (`README.md`, `SECURITY.md`, `CHANGELOG.md`, the `cargo doc` comments, etc.) if you change user-facing behavior, configuration schemas, or compliance boundaries. A change to what a producer rebuild re-reads or checks (`ManagedProducer`, `SecurityPosture`) or to the way secrets are handled must be reflected in `SECURITY.md` too. Check the API documentation with `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features --document-private-items`, and the Markdown links with a link checker of your choice.
-4. Keep the PR description clear: what does this fix/add, and how was it tested?
-5. Ensure the GitHub Actions pipelines (`audit.yml` and `build.yml`) pass.
-6. If your change touches the ingestion, buffering, or egress path (`providers.rs`, `sinks.rs`, `kafka.rs`), include your test results along with internal-process and end-to-end latency evaluations (`stress`/`spike` output). This isn't required for documentation, configuration, or CLI-only changes.
+A new dependency must pass `cargo vet`. Review it and run `cargo vet certify` rather than adding an exemption, and update `deny.toml` if it brings a native build tool.
 
-## Vulnerability Reporting
+## Tests
 
-Please **do not** report security vulnerabilities through public GitHub issues. Refer to the [Security Policy](SECURITY.md#reporting-a-vulnerability) for instructions on emailing the maintainer directly.
+The tests use in-memory sinks and need no broker. There is no unit test. The end-to-end harness lives outside this repository, see [PERFORMANCE.md](PERFORMANCE.md#end-to-end).
+
+| Test | Duration | Channels | Nominal rate | Required `net.core.rmem_max` | Purpose |
+|---|---|---|---|---|---|
+| `config` | Instant | — | — | — | Validation, permissions, secret leaks |
+| `simple_latency` | Instant | 1 | 3 packets | 64 KiB | Latency smoke test |
+| `stress` | 5 min | 1 | 1 kHz | 2 MiB | Sustained throughput |
+| `spike` | 10 s | 1 | 1 MHz | 2 MiB | Burst resilience |
+| `multi_channel_stress` | 5 min | 5 | 100 kHz/channel | 2 MiB | Concurrency |
+| `multi_channel_iperf_stress` | 5 min | 5 | External | 250 MiB | External traffic generator |
+
+```bash
+export NBD_TEST_INTERFACE=eth0
+cargo test --test simple_latency -- --nocapture
+cargo test --release --test stress -- --nocapture
+```
+
+`NBD_TEST_INTERFACE` must be the interface that carries your multicast route. It defaults to `lo` on Linux and to index `1` elsewhere.
+
+Run `simple_latency` before a pull request. Run the benchmarks if your change touches `providers.rs`, `sinks.rs` or `kafka.rs`, and add the results to the pull request, see [Reproducing the benchmarks](PERFORMANCE.md#reproducing-the-benchmarks). A bare `cargo test --all-features` runs everything, in more than 15 minutes.
+
+## CI
+
+| Workflow | Trigger | Jobs |
+|---|---|---|
+| `build.yml` | Push and pull request to `main` | Linux release build with all features, Ferrocene 26.05 build, Windows `config` tests and build |
+| `audit.yml` | Same, and daily at 06:00 UTC | `cargo fmt`, `cargo audit`, `cargo deny`, `cargo vet`, `clippy` and `config` tests on every feature combination. `cargo outdated` is skipped on the daily run |
+| `release.yml` | Tag `vX.Y.Z` or `vX.Y.Z-suffix` | `cargo fmt`, `clippy`, `config` tests, `cargo audit`, `cargo deny`, `cargo vet`, then Linux and Windows binaries with and without metrics, `SHA256SUMS`, attestations, GitHub Release |
+
+## Documentation
+
+Update the documentation in the same pull request as the change.
+
+| Change | Update |
+|---|---|
+| Parameter, default or validation rule | `CONFIGURATION.md`, doc comments of `config.rs`, `tests/config.rs` |
+| Secrets, files, or what a rebuild re-reads or compares | `PRODUCTION.md`, `SECURITY.md`, doc comments of `kafka.rs` and `config.rs` |
+| Metric | `PRODUCTION.md` |
+| Hot path, or a default that affects latency | `PERFORMANCE.md`, including which figures are no longer current |
+| CI, `deny.toml`, `supply-chain/` | This file, and the matrix of `SECURITY.md` if it is used as evidence |
+| Anything user-visible | `CHANGELOG.md` |
+
+## Layout
+
+| Path | Content |
+|---|---|
+| `src/main.rs` | CLI, logging, shutdown |
+| `src/config.rs` | Configuration, secrets, security posture |
+| `src/providers.rs` | Multicast sockets and receive loop |
+| `src/sinks.rs` | `MessageSink` and its Kafka, bench and iperf implementations |
+| `src/kafka.rs` | Producer builder, `ManagedProducer`, supervisor |
+| `src/errors.rs` | `NbdError`, `UnwindShield` |
+| `src/args.rs`, `src/about.rs` | CLI arguments, `--about` |
+| `tests/` | Configuration tests and benchmarks |
+| `supply-chain/` | `cargo-vet` audits, trusted publishers, exemptions |
+| `build.rs` | Build date, architecture, features |
+
+## Pull requests
+
+1. Create a feature branch from `main`.
+2. Add tests for new behavior.
+3. Update the documentation.
+4. Describe what the change does and how it was tested.
+5. Make sure `build.yml` and `audit.yml` pass.
+
+Report vulnerabilities as described in [SECURITY.md](SECURITY.md#reporting-a-vulnerability), not in an issue.

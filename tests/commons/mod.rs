@@ -35,10 +35,13 @@ pub fn show_report(
         println!("╔═══════════{}╗", "═".repeat(format_len));
         println!("║ REPORT : {:<format_len$} ║", test_name);
         println!("╠═══════════{}╣", "═".repeat(format_len));
-        if nb_sent.is_some() && nb_received.is_some() {
+        if let Some(sent) = nb_sent
+            && sent != 0
+            && nb_received.is_some()
+        {
             println!(
                 "║ Accuracy            : {:>format_len$.2}% ║",
-                ((nb_received.unwrap_or(0) as f64) / (nb_sent.unwrap_or(1) as f64)) * 100.0,
+                ((nb_received.unwrap_or(0) as f64) / (sent as f64)) * 100.0,
                 format_len = format_len - 14
             );
         };
