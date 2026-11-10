@@ -962,7 +962,7 @@ impl TryFrom<RawProducerConfig> for ProducerConfig {
             }
             None => {
                 warn!(
-                    "The `kafka.retries` parameter is unspecified and was replaced by a default value of `2`."
+                    "The `kafka.message_retries` parameter is unspecified and was replaced by a default value of `2`."
                 );
             }
         };

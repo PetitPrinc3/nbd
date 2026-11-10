@@ -71,7 +71,7 @@ The daemon's Rust code is memory-safe, with `unsafe` forbidden. The C code of `l
 
 ## ANSSI compliance matrix
 
-Self-assessment against the 60 rules and recommendations of the [ANSSI Secure Rust Guide](https://anssi-fr.github.io/rust-guide/checklist.html): 25 compliant, 2 partially compliant, 33 not applicable. This isn't a certification.
+Self-assessment against the 60 rules and recommendations of the [ANSSI Secure Rust Guide](https://anssi-fr.github.io/rust-guide/checklist.html): 26 compliant, 1 partially compliant, 33 not applicable. This isn't a certification.
 
 - ✅ Compliant
 - ⚠️ Partially compliant
@@ -96,7 +96,7 @@ Several rules rely on `clippy` lints declared with `#![deny(...)]` in `src/main.
 
 | Rule | Requirement | Status | Evidence |
 |---|---|---|---|
-| `LIBS-VETTING-DIRECT` | Validate direct dependencies | ⚠️ | `cargo vet --locked` tracks validation and `deny.toml` restricts sources. Of the 17 direct dependencies, 7 are covered by audits (6 local, 1 imported), 8 by trusted publishers, and 2 are exemptions: `chrono` and `rdkafka`. |
+| `LIBS-VETTING-DIRECT` | Validate direct dependencies | ✅ | `cargo vet --locked` tracks validation and `deny.toml` restricts sources. Of the 17 direct dependencies, 7 are covered by audits (8 local, 1 imported) and 8 by trusted publishers. |
 | `LIBS-VETTING-TRANSITIVE` | Validate transitive dependencies | ⚠️ | Same tools. `cargo vet` reports 46 of 168 third-party crates as exempted and 9 as partially audited, through the exemptions of `supply-chain/config.toml`. |
 | `LIBS-OUTDATED` | Check for outdated dependencies | ✅ | `cargo outdated --exit-code 1` on every push and pull request to `main`. Skipped on the daily run, not a gate of `release.yml`. |
 | `LIBS-AUDIT` | Check for known vulnerabilities | ✅ | `cargo audit` in `audit.yml`, including daily, and in `release.yml`. Informational advisories are left to `cargo deny`. |

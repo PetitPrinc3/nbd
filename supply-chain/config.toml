@@ -7,6 +7,9 @@ version = "0.10"
 [imports.bytecode-alliance]
 url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml"
 
+[imports.embark-studios]
+url = "https://raw.githubusercontent.com/EmbarkStudios/rust-ecosystem/main/audits.toml"
+
 [imports.google]
 url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
 
@@ -18,21 +21,6 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
-
-[[exemptions.autocfg]]
-version = "1.5.1"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
-[[exemptions.bitflags]]
-version = "2.13.2"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
-[[exemptions.chrono]]
-version = "0.4.45"
-criteria = "safe-to-deploy"
-notes = "P4: direct dependency, manual audit pending."
 
 [[exemptions.crossbeam-epoch]]
 version = "0.9.21"
@@ -56,11 +44,6 @@ notes = "P5-P8: transitive dependency, vetting pending."
 
 [[exemptions.evmap]]
 version = "11.0.0"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
-[[exemptions.futures-task]]
-version = "0.3.21"
 criteria = "safe-to-deploy"
 notes = "P5-P8: transitive dependency, vetting pending."
 
@@ -134,11 +117,6 @@ version = "1.2.3"
 criteria = "safe-to-deploy"
 notes = "P5-P8: transitive dependency, vetting pending."
 
-[[exemptions.pin-project-lite]]
-version = "0.2.17"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
 [[exemptions.portable-atomic]]
 version = "1.15.0"
 criteria = "safe-to-deploy"
@@ -164,11 +142,6 @@ version = "5.2.0"
 criteria = "safe-to-deploy"
 notes = "Not built for NBD's release targets (x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc), only for UEFI targets (getrandom)."
 
-[[exemptions.rand]]
-version = "0.9.5"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
 [[exemptions.rand_xoshiro]]
 version = "0.7.0"
 criteria = "safe-to-deploy"
@@ -178,16 +151,6 @@ notes = "P5-P8: transitive dependency, vetting pending."
 version = "4.5.1"
 criteria = "safe-to-deploy"
 notes = "P5-P8: transitive dependency, vetting pending."
-
-[[exemptions.raw-cpuid]]
-version = "11.6.0"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
-[[exemptions.rdkafka]]
-version = "0.39.0"
-criteria = "safe-to-deploy"
-notes = "P4: direct dependency, manual audit pending."
 
 [[exemptions.rdkafka-sys]]
 version = "4.10.0+2.12.1"
@@ -219,30 +182,10 @@ version = "0.4.6"
 criteria = "safe-to-deploy"
 notes = "P5-P8: transitive dependency, vetting pending."
 
-[[exemptions.signal-hook-registry]]
-version = "1.4.8"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
 [[exemptions.sketches-ddsketch]]
 version = "0.3.2"
 criteria = "safe-to-deploy"
 notes = "P5-P8: transitive dependency, vetting pending."
-
-[[exemptions.smallvec]]
-version = "1.16.4"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
-[[exemptions.tower-service]]
-version = "0.3.1"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
-[[exemptions.valuable]]
-version = "0.1.0"
-criteria = "safe-to-deploy"
-notes = "Not built for NBD's release targets (x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc), only under cfg(tracing_unstable)."
 
 [[exemptions.wasm-bindgen]]
 version = "0.2.130"
@@ -283,11 +226,6 @@ notes = "Not built for NBD's release targets (x86_64-unknown-linux-gnu, x86_64-p
 version = "0.4.0"
 criteria = "safe-to-deploy"
 notes = "Not built for NBD's release targets (x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc), only for x86_64-pc-windows-gnu (winapi)."
-
-[[exemptions.zerocopy]]
-version = "0.8.63"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
 
 [[exemptions.zerocopy-derive]]
 version = "0.8.63"

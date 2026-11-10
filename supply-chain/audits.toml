@@ -7,6 +7,30 @@ criteria = "safe-to-deploy"
 version = "1.9.5"
 notes = "Full review of the 1.9.3 code base (lib, ref_cnt, debt, strategy/hybrid, access, cache, as_raw; weak, serde and rwlock-strategy features) plus the 1.9.3 -> 1.9.5 delta. 1.9.4 tags debts with RefCnt::TAG so Arc and Weak debts on one allocation no longer collide (#214); every debt write and comparison uses Debt::encode and every storing entry point calls check_tag. 1.9.5 keys unconfirmed debts to their storage so writers of other instances skip debts naming a reused address (#210); the helping slot carries the key, the fast path clears it on confirmation, and confirmed helping debts become full counts before load returns, so a moved ArcSwap stays correct. The storage word is published by the SeqCst pointer swap. No new dependency, build script, I/O or FFI. #210 is still open upstream pending the reporter's confirmation; the global SeqCst memory-model argument was not re-derived."
 
+[[audits.autocfg]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.5.0 -> 1.5.1"
+notes = "No change under src/; manifest metadata, README and tests only."
+
+[[audits.bitflags]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "2.11.1 -> 2.13.2"
+notes = "New safe APIs (all_named, iter_equal_names) and macro plumbing for flag names and attributes. No unsafe, transmute or powerful import added."
+
+[[audits.chrono]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.4.45"
+notes = "Reviewed per the safe-to-deploy criteria: every unsafe block and powerful import. No build script or proc macro. With default features off and now only (std, alloc), two unsafe sites compile: the manual Send impl on the deprecated Date<Tz> matches the auto impl (fields NaiveDate and Tz::Offset), and NaiveDate::from_yof's NonZeroI32::new_unchecked never receives 0, since every caller keeps the year flags (bits 0-2, never zero) through masks that exclude them. The clock feature adds: CStr up to the first NUL, TimeZoneName's from_utf8_unchecked after a strict [0-9A-Za-z+-] check, mem::zeroed on POD Win32 structs, a checked GetTimeZoneInformationForYear; the unchecked assume_init calls in windows.rs are test-only. Reading TZ, /etc/localtime and TZif files is clock-only and follows POSIX TZ semantics. RUSTSEC-2020-0159 fixed since 0.4.20. Date arithmetic and formatting logic not reviewed line by line; mozilla audited every delta 0.4.19 -> 0.4.42."
+
+[[audits.futures-task]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.3.31"
+notes = "No dependencies or build script. ArcWake (Send + Sync) RawWaker vtables are monomorphized per W and keep Arc counts balanced; WakerRef copies are ManuallyDrop and only exposed as &Waker; the noop waker has null data and a no-op vtable. FutureObj erases the lifetime but keeps it in PhantomData; pinning is guaranteed by each UnsafeFutureObj impl (Unpin for &mut F, heap for Box) and drop rebuilds the original box; Send is guarded by F: Send or the unsafe into_future_obj."
+
 [[audits.metrics]]
 who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
@@ -19,17 +43,59 @@ criteria = "safe-to-deploy"
 version = "0.18.3"
 notes = "Reviewed for NBD's features (default features off, http-listener); push-gateway, protobuf and uds-listener paths not reviewed. build.rs only runs prost-build under the protobuf feature. One unsafe, evmap::new_assert_stable, is justified: keys and values hash and compare deterministically. HTTP listener checks the IP allowlist per connection and answers 403; label values escape newlines, quotes and backslashes. Discretion: no hyper timer is set, so there is no header read timeout and no connection limit; any peer, allowed or not, can hold connections open. Keep the endpoint on loopback or behind a firewall."
 
+[[audits.pin-project-lite]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.2.16 -> 0.2.17"
+notes = "Docs, doc-test and lint attributes only; macro bodies (generated unsafe code) unchanged."
+
+[[audits.rand]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.9.4 -> 0.9.5"
+notes = "Adds UniformInt::max and validates Uniform<char> on serde deserialization (rejects ranges beyond char::MAX, which could otherwise yield invalid chars). No unsafe change."
+
+[[audits.raw-cpuid]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "11.5.0 -> 11.6.0"
+notes = "Safe bitfield decoding for new AMD CPUID leaves (IBS capabilities, extended PQoS) and their Display; unsafe sites (cpuid and three byte-slice views) unchanged."
+
+[[audits.rdkafka]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.39.0"
+notes = "Full review of the producer path NBD uses (util, config, client, error, message, producer); consumer, admin, groups, metadata, mocking and topic_partition_list reviewed for risky unsafe patterns, not line by line. No build script. Callbacks go through polled events; only partitioner_cb and the queue-nonempty callbacks run on librdkafka threads. Delivery opaques are reclaimed exactly once, payloads are copied, header ownership follows librdkafka, BorrowedMessage keeps its event alive. Client-before-queue drop order is benign. Discretion: TopicPartitionList::elements(&self) hands out aliasing &mut on a Sync type (data race in safe code; unused by NBD); partitioner_cb builds &mut from the shared context (custom partitioners only); a failed rd_kafka_new leaks the native config, credentials included; KafkaError::ClientConfig prints rejected values, sensitive keys included (unreachable in NBD)."
+
 [[audits.secrecy]]
 who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
 version = "0.10.3"
 notes = "Full review (204 lines). forbid(unsafe_code), no_std, no build script, depends only on zeroize (serde optional). Debug redacts, zeroize on drop. Known limit: From<String> uses into_boxed_str(), which may reallocate and leave the old buffer unzeroized; deserialization leaves intermediate copies."
 
+[[audits.signal-hook-registry]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.4.1 -> 1.4.8"
+notes = "Replaces static mut GLOBAL_DATA with a once-initialized, never-freed AtomicPtr (Release/Acquire); saves and restores errno around handler execution (new errno dependency); HashMap/BTreeMap replaced by a Vec-backed map without unsafe, allocating only at registration; function-pointer casts go through *const (). No new unsafe."
+
+[[audits.smallvec]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.15.2 -> 1.16.4"
+notes = "retain rewritten after std's Vec::retain_mut (read/write cursors, backshift guard): panics in the predicate or in drop cause no double drop or lost element. push split into inline/heap branches with equivalent bounds. try_grow returns early instead of asserting when new_cap < len, so the buffer never shrinks below len. Adds PhantomData<A::Item> for drop check with may_dangle. Other changes are formatting."
+
 [[audits.smallvec]]
 who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "1.16.4 -> 1.16.5"
 notes = "Comment reflow and Cargo.toml formatting only, no code change. Publisher alejandro-vaz (crates.io owner) verified: 1.16.5 is tag v1.16.5 on branch v1 of github.com/servo/rust-smallvec (commit 6e900059, PR #853); the published src/lib.rs, README.md and Cargo.toml match that commit byte for byte."
+
+[[audits.tower-service]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.3.1"
+notes = "45 lines: the Service trait and blanket impls for &mut S and Box<S>. No unsafe, no dependencies."
 
 [[audits.tracing]]
 who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
@@ -523,6 +589,13 @@ user-id = 6743 # Ed Page (epage)
 start = "2023-02-22"
 end = "2027-11-01"
 notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
+
+[[trusted.zerocopy]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:google/zerocopy"
+start = "2026-09-08"
+end = "2027-11-01"
+notes = "Crate authored and published by Google from github.com/google/zerocopy via crates.io Trusted Publishing; google (imported) audits zerocopy up to 0.8.27. Targeted extension of the strict rule, decided for NBD."
 
 [[trusted.zmij]]
 criteria = "safe-to-deploy"
