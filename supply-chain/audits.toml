@@ -1,589 +1,526 @@
 
 # cargo-vet audits file
 
-[[audits.js-sys]]
-who = "PetitPrinc3 <arthur.reppelin@gmail.com>"
+[[audits.arc-swap]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
-version = "0.3.107"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+version = "1.9.3"
+notes = "Full review of the default build (lib, ref_cnt, debt, strategy/hybrid, access, cache, as_raw) and of the weak, serde and rwlock-strategy features. No build script, I/O, FFI, environment or process access. Each unsafe upholds its stated invariant: RefCnt conversions keep counts balanced; debt nodes are leaked and never freed, so raw traversal and Handover dereferences stay valid; pay_all and HybridProtection balance counts on every path, panics included; generation wrap-around triggers a cooldown (ABA). No manual Send/Sync. Bounded leak of one node per concurrent thread. RUSTSEC-2020-0091 fixed since 1.1.0. The SeqCst memory-model argument was not re-derived."
 
-[[audits.log]]
-who = "PetitPrinc3 <arthur.reppelin@gmail.com>"
+[[audits.metrics]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
-delta = "0.4.34 -> 0.4.35"
-notes = "The update doesn't include source changes. It verifies `log`'s new CI/CD processes."
+version = "0.24.6"
+notes = '''Full review. No build script, I/O, FFI, environment or process access; only dependency rapidhash. cow.rs reconstructs exactly what it decomposes; the capacity-encoded kind is sound. Cow's Send/Sync bounds would be too weak for Arc-backed T: \!Sync, but Cow is private and only used with str and [Label]. RecorderOnceCell is sound behind set_global_recorder (R: Sync). Discretion: set_default_local_recorder is unsound in safe code (mem::forget on the guard leaves a dangling thread-local recorder, use-after-free reproduced). NBD only installs a global recorder and never calls it and is therefore not affected by the UAF issue.'''
 
-[[audits.wasm-bindgen]]
-who = "PetitPrinc3 <arthur.reppelin@gmail.com>"
+[[audits.metrics-exporter-prometheus]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
-version = "0.2.130"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+version = "0.18.3"
+notes = "Reviewed for NBD's features (default features off, http-listener); push-gateway, protobuf and uds-listener paths not reviewed. build.rs only runs prost-build under the protobuf feature. One unsafe, evmap::new_assert_stable, is justified: keys and values hash and compare deterministically. HTTP listener checks the IP allowlist per connection and answers 403; label values escape newlines, quotes and backslashes. Discretion: no hyper timer is set, so there is no header read timeout and no connection limit; any peer, allowed or not, can hold connections open. Keep the endpoint on loopback or behind a firewall."
 
-[[audits.wasm-bindgen-macro]]
-who = "PetitPrinc3 <arthur.reppelin@gmail.com>"
+[[audits.secrecy]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
-version = "0.2.130"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+version = "0.10.3"
+notes = "Full review (204 lines). forbid(unsafe_code), no_std, no build script, depends only on zeroize (serde optional). Debug redacts, zeroize on drop. Known limit: From<String> uses into_boxed_str(), which may reallocate and leave the old buffer unzeroized; deserialization leaves intermediate copies."
 
-[[audits.wasm-bindgen-macro-support]]
-who = "PetitPrinc3 <arthur.reppelin@gmail.com>"
+[[audits.tracing]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
-version = "0.2.130"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+delta = "0.1.41 -> 0.1.44"
+notes = "Source delta reviewed (619 lines, the rest is generated tests). One new unsafe, from_utf8_unchecked in __macro_support::FieldName::as_str, is sound: FieldName::new only drops ASCII 'r#' pairs from a valid &str and checks the length. Otherwise no_std restructuring and macro refactoring. No build script, I/O or new dependency."
 
-[[audits.wasm-bindgen-shared]]
-who = "PetitPrinc3 <arthur.reppelin@gmail.com>"
+[[audits.tracing-attributes]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
-version = "0.2.130"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+delta = "0.1.30 -> 0.1.31"
+notes = "Proc-macro: adds {expr} field names to #[instrument] and removes dead code. Token manipulation only, no I/O or environment access."
 
-[[audits.web-sys]]
-who = "PetitPrinc3 <arthur.reppelin@gmail.com>"
+[[audits.tracing-subscriber]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
-version = "0.3.107"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+delta = "0.3.20 -> 0.3.23"
+notes = "New unsafe blocks only wrap pre-existing downcast_raw calls (unsafe_op_in_unsafe_fn). New with_ansi_sanitization() opt-out: sanitization stays on by default and NBD does not disable it. Span stack no longer clones/closes span refs on enter/exit (safe code). no_std restructuring. No build script or new dependency."
 
 [[trusted.aho-corasick]]
 criteria = "safe-to-deploy"
 user-id = 189 # Andrew Gallant (BurntSushi)
 start = "2019-03-28"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.anstream]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2023-03-16"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.anstyle]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2022-05-18"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.anstyle-parse]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2023-03-08"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.anstyle-query]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2023-04-13"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.anstyle-wincon]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2023-03-08"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
-
-[[trusted.autocfg]]
-criteria = "safe-to-deploy"
-user-id = 539 # Josh Stone (cuviper)
-start = "2019-05-22"
-end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.bytes]]
 criteria = "safe-to-deploy"
 user-id = 6741 # Alice Ryhl (Darksonn)
 start = "2021-01-11"
 end = "2027-11-01"
-notes = "Publisher already trusted by mozilla and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.cc]]
 criteria = "safe-to-deploy"
-user-id = 55123 # rust-lang-owner
-start = "2022-10-29"
+trusted-publisher = "github:rust-lang/cc-rs"
+start = "2025-09-01"
 end = "2027-11-01"
-notes = "Publisher already trusted by  (imported audits)."
+notes = "Crate of the Rust project, published from github.com/rust-lang/cc-rs by crates.io Trusted Publishing. bytecode-alliance, isrg and mozilla trust the Rust project's crates.io account for cc and libc."
 
 [[trusted.cfg-if]]
 criteria = "safe-to-deploy"
 user-id = 55123 # rust-lang-owner
 start = "2025-06-09"
 end = "2027-11-01"
-notes = "Publisher already trusted by  (imported audits)."
+notes = "Crate of the Rust project (rust-lang GitHub organization), published by its official crates.io account. bytecode-alliance, isrg and mozilla trust this account for hashbrown, libc and cc."
 
 [[trusted.clap]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2021-12-08"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.clap_builder]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2023-03-28"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.clap_derive]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2021-12-08"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.clap_lex]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2022-04-15"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.cmake]]
 criteria = "safe-to-deploy"
 user-id = 55123 # rust-lang-owner
 start = "2022-10-29"
 end = "2027-11-01"
-notes = "Publisher already trusted by  (imported audits)."
+notes = "Crate of the Rust project (rust-lang GitHub organization), published by its official crates.io account. bytecode-alliance, isrg and mozilla trust this account for hashbrown, libc and cc."
 
 [[trusted.colorchoice]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2023-04-13"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
-
-[[trusted.curl-sys]]
-criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
-start = "2019-03-12"
-end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.equivalent]]
 criteria = "safe-to-deploy"
 user-id = 539 # Josh Stone (cuviper)
 start = "2023-02-05"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.find-msvc-tools]]
 criteria = "safe-to-deploy"
-user-id = 539 # Josh Stone (cuviper)
-start = "2025-08-29"
+trusted-publisher = "github:rust-lang/cc-rs"
+start = "2025-09-05"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Crate of the Rust project, published from github.com/rust-lang/cc-rs by crates.io Trusted Publishing. bytecode-alliance, isrg and mozilla trust the Rust project's crates.io account for cc and libc."
 
 [[trusted.h2]]
 criteria = "safe-to-deploy"
 user-id = 359 # Sean McArthur (seanmonstar)
 start = "2019-03-13"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.hashbrown]]
 criteria = "safe-to-deploy"
-user-id = 2915 # Amanieu d'Antras (Amanieu)
-start = "2019-04-02"
+user-id = 55123 # rust-lang-owner
+start = "2025-04-30"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.http]]
 criteria = "safe-to-deploy"
 user-id = 359 # Sean McArthur (seanmonstar)
 start = "2019-04-05"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.http-body]]
 criteria = "safe-to-deploy"
 user-id = 359 # Sean McArthur (seanmonstar)
 start = "2019-10-01"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.http-body-util]]
 criteria = "safe-to-deploy"
 user-id = 359 # Sean McArthur (seanmonstar)
 start = "2022-10-25"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.httparse]]
 criteria = "safe-to-deploy"
 user-id = 359 # Sean McArthur (seanmonstar)
 start = "2019-07-03"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.hyper]]
 criteria = "safe-to-deploy"
 user-id = 359 # Sean McArthur (seanmonstar)
 start = "2019-03-01"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.hyper-util]]
 criteria = "safe-to-deploy"
 user-id = 359 # Sean McArthur (seanmonstar)
 start = "2022-01-15"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: mozilla."
 
 [[trusted.indexmap]]
 criteria = "safe-to-deploy"
 user-id = 539 # Josh Stone (cuviper)
 start = "2020-01-15"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.is_terminal_polyfill]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2024-05-02"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.itoa]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
 start = "2019-05-02"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
-
-[[trusted.js-sys]]
-criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
-start = "2019-03-04"
-end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.lazy_static]]
 criteria = "safe-to-deploy"
 user-id = 55123 # rust-lang-owner
 start = "2026-10-01"
 end = "2027-11-01"
-notes = "Publisher already trusted by  (imported audits)."
+notes = "Crate of the Rust project (rust-lang GitHub organization), published by its official crates.io account. bytecode-alliance, isrg and mozilla trust this account for hashbrown, libc and cc."
 
 [[trusted.libc]]
 criteria = "safe-to-deploy"
-user-id = 55123 # rust-lang-owner
-start = "2024-08-15"
+trusted-publisher = "github:rust-lang/libc"
+start = "2026-10-02"
 end = "2027-11-01"
-notes = "Publisher already trusted by  (imported audits)."
+notes = "Crate of the Rust project, published from github.com/rust-lang/libc by crates.io Trusted Publishing. bytecode-alliance, isrg and mozilla trust the Rust project's crates.io account for cc and libc."
 
-[[trusted.loom]]
+[[trusted.libz-sys]]
 criteria = "safe-to-deploy"
-user-id = 6741 # Alice Ryhl (Darksonn)
-start = "2021-04-12"
+trusted-publisher = "github:rust-lang/libz-sys"
+start = "2026-11-10"
+end = "2027-11-10"
+
+[[trusted.log]]
+criteria = "safe-to-deploy"
+trusted-publisher = "github:rust-lang/log"
+start = "2026-10-30"
 end = "2027-11-01"
-notes = "Publisher already trusted by mozilla and bytecode-alliance (imported audits)."
+notes = "Crate of the Rust project, published from github.com/rust-lang/log by crates.io Trusted Publishing. bytecode-alliance, isrg and mozilla trust the Rust project's crates.io account for cc and libc."
 
 [[trusted.memchr]]
 criteria = "safe-to-deploy"
 user-id = 189 # Andrew Gallant (BurntSushi)
 start = "2019-07-07"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.mio]]
 criteria = "safe-to-deploy"
 user-id = 6025 # Thomas de Zeeuw (Thomasdezeeuw)
 start = "2019-12-17"
 end = "2027-11-01"
-notes = "Publisher already trusted by mozilla and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.once_cell_polyfill]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2025-05-22"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.proc-macro2]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
 start = "2019-04-23"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.regex-automata]]
 criteria = "safe-to-deploy"
 user-id = 189 # Andrew Gallant (BurntSushi)
 start = "2019-02-25"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.regex-syntax]]
 criteria = "safe-to-deploy"
 user-id = 189 # Andrew Gallant (BurntSushi)
 start = "2019-03-30"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.rustversion]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
 start = "2019-07-08"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
-
-[[trusted.scoped-tls]]
-criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
-start = "2019-02-26"
-end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: mozilla."
 
 [[trusted.serde]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
 start = "2019-03-01"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.serde_core]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
 start = "2025-09-13"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.serde_derive]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
 start = "2019-03-01"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.serde_json]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
 start = "2019-02-28"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.serde_spanned]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2023-01-20"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.slab]]
 criteria = "safe-to-deploy"
 user-id = 6741 # Alice Ryhl (Darksonn)
 start = "2021-10-13"
 end = "2027-11-01"
-notes = "Publisher already trusted by mozilla and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.socket2]]
 criteria = "safe-to-deploy"
 user-id = 6025 # Thomas de Zeeuw (Thomasdezeeuw)
 start = "2020-09-09"
 end = "2027-11-01"
-notes = "Publisher already trusted by mozilla and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.syn]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
 start = "2019-03-01"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.thiserror]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
 start = "2019-10-09"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.thiserror-impl]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
 start = "2019-10-09"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.thread_local]]
 criteria = "safe-to-deploy"
 user-id = 2915 # Amanieu d'Antras (Amanieu)
 start = "2019-09-07"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: isrg, mozilla."
 
 [[trusted.tokio]]
 criteria = "safe-to-deploy"
 user-id = 6741 # Alice Ryhl (Darksonn)
 start = "2020-12-25"
 end = "2027-11-01"
-notes = "Publisher already trusted by mozilla and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.tokio-macros]]
 criteria = "safe-to-deploy"
 user-id = 6741 # Alice Ryhl (Darksonn)
 start = "2020-10-26"
 end = "2027-11-01"
-notes = "Publisher already trusted by mozilla and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.tokio-util]]
 criteria = "safe-to-deploy"
 user-id = 6741 # Alice Ryhl (Darksonn)
 start = "2021-01-12"
 end = "2027-11-01"
-notes = "Publisher already trusted by mozilla and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.toml]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2022-12-14"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.toml_datetime]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2022-10-21"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.toml_edit]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2021-09-13"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.toml_parser]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2025-07-08"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.toml_writer]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2025-07-08"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.unicode-ident]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
 start = "2021-10-02"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
-
-[[trusted.want]]
-criteria = "safe-to-deploy"
-user-id = 359 # Sean McArthur (seanmonstar)
-start = "2019-03-19"
-end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.wasi]]
 criteria = "safe-to-deploy"
 user-id = 1 # Alex Crichton (alexcrichton)
 start = "2020-06-03"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
-
-[[trusted.wasm-bindgen]]
-criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
-start = "2019-03-04"
-end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
-
-[[trusted.wasm-bindgen-macro]]
-criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
-start = "2019-03-04"
-end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
-
-[[trusted.wasm-bindgen-macro-support]]
-criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
-start = "2019-03-04"
-end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
-
-[[trusted.wasm-bindgen-shared]]
-criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
-start = "2019-03-04"
-end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
-
-[[trusted.web-sys]]
-criteria = "safe-to-deploy"
-user-id = 1 # Alex Crichton (alexcrichton)
-start = "2019-03-04"
-end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla."
 
 [[trusted.windows-core]]
 criteria = "safe-to-deploy"
 user-id = 64539 # Kenny Kerr (kennykerr)
 start = "2021-11-15"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, zcash, mozilla, and 1 other (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla, zcash."
 
 [[trusted.windows-implement]]
 criteria = "safe-to-deploy"
 user-id = 64539 # Kenny Kerr (kennykerr)
 start = "2022-01-27"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, zcash, mozilla, and 1 other (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: mozilla, zcash."
 
 [[trusted.windows-interface]]
 criteria = "safe-to-deploy"
 user-id = 64539 # Kenny Kerr (kennykerr)
 start = "2022-02-18"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, zcash, mozilla, and 1 other (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla, zcash."
 
 [[trusted.windows-link]]
 criteria = "safe-to-deploy"
 user-id = 64539 # Kenny Kerr (kennykerr)
 start = "2024-07-17"
-end = "2027-11-05"
+end = "2027-11-01"
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla, zcash."
 
 [[trusted.windows-result]]
 criteria = "safe-to-deploy"
 user-id = 64539 # Kenny Kerr (kennykerr)
 start = "2024-02-02"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, zcash, mozilla, and 1 other (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: mozilla, zcash."
 
 [[trusted.windows-strings]]
 criteria = "safe-to-deploy"
 user-id = 64539 # Kenny Kerr (kennykerr)
 start = "2024-02-02"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, zcash, mozilla, and 1 other (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: mozilla, zcash."
 
 [[trusted.windows-sys]]
 criteria = "safe-to-deploy"
 user-id = 64539 # Kenny Kerr (kennykerr)
 start = "2021-11-15"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, zcash, mozilla, and 1 other (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, isrg, mozilla, zcash."
 
 [[trusted.winnow]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
 start = "2023-02-22"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: bytecode-alliance, mozilla."
 
 [[trusted.zmij]]
 criteria = "safe-to-deploy"
 user-id = 3618 # David Tolnay (dtolnay)
 start = "2025-12-18"
 end = "2027-11-01"
-notes = "Publisher already trusted by isrg, mozilla, and bytecode-alliance (imported audits)."
+notes = "Publisher trusted for this crate by imported audit sets: isrg."

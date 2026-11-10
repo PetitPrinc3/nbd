@@ -163,7 +163,7 @@ impl Provider {
                 maddr_v6,
                 self.port,
                 0,
-                self.interface.index()?,
+                self.interface.index(&socket, true)?,
             )),
         };
 
@@ -192,7 +192,9 @@ impl Provider {
     /// and [`NbdError::Network`] when the group cannot be joined.
     pub fn join(&self) -> Result<(), NbdError> {
         let socket = self.socket()?;
-        let idx = self.interface.index()?;
+        let idx = self
+            .interface
+            .index(socket, matches!(self.group, IpAddr::V6(_)))?;
 
         match self.group {
             IpAddr::V4(maddr_v4) => {

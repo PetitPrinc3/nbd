@@ -107,6 +107,8 @@ use std::path::PathBuf;
 
 use tracing::{debug, error, info, warn};
 
+use socket2::{Domain, Protocol, Socket, Type};
+
 use crate::errors::{NbdError, parse_toml_error};
 
 /// Largest UDP payload a provider accepts, in bytes: the IPv6 limit, which covers the 65,507 bytes
@@ -392,31 +394,42 @@ impl ProviderConfig {
         }
 
         match raw_provider_config.interface {
-            Some(interface) => match interface.index() {
-                Ok(index) => {
-                    if index == 0 {
-                        error!(
-                            "The `provider.{}.interface` is invalid as use of the default interface (0) is forbidden.",
-                            idx
-                        );
-                        errors.push(String::from("forbidden interface value"));
-                    } else {
-                        debug!(
-                            "The `provider.{}.interface` is correctly set to a valid interface.",
-                            idx
-                        );
+            Some(interface) => {
+                let is_ipv6 = provider_config.group.is_ipv6();
+                let socket = Socket::new(
+                    if is_ipv6 { Domain::IPV6 } else { Domain::IPV4 },
+                    Type::DGRAM,
+                    Some(Protocol::UDP),
+                )?;
 
-                        provider_config.interface = interface;
+                match interface.index(&socket, is_ipv6) {
+                    Ok(index) => {
+                        if index == 0 {
+                            error!(
+                                "The `provider.{}.interface` is invalid as use of the default interface (0) is forbidden.",
+                                idx
+                            );
+                            errors.push(String::from("forbidden interface value"));
+                        } else {
+                            debug!(
+                                "The `provider.{}.interface` is correctly set to a valid interface.",
+                                idx
+                            );
+
+                            provider_config.interface = interface;
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "The `provider.{}.interface` parameter is invalid : {}",
+                            idx, e
+                        );
+                        errors.push(String::from("invalid interface"));
                     }
                 }
-                Err(e) => {
-                    error!(
-                        "The `provider.{}.interface` parameter is invalid : {}",
-                        idx, e
-                    );
-                    errors.push(String::from("invalid interface"));
-                }
-            },
+
+                drop(socket);
+            }
             None => {
                 error!("The `provider.{}.interface` parameter is missing.", idx);
                 errors.push(String::from("missing interface"));
@@ -1646,34 +1659,23 @@ impl Interface {
     /// # Errors
     ///
     /// Returns [`NbdError::Socket`] when the interface doesn't exist or its index cannot be read.
-    pub fn index(&self) -> Result<u32, NbdError> {
+    pub fn index(&self, _socket: &Socket, _is_ipv6: bool) -> Result<u32, NbdError> {
         #[cfg(target_os = "linux")]
         {
-            let mut path = PathBuf::from("/sys/class/net");
-            path.push(&self.0);
-            path.push("ifindex");
+            _socket.bind_device(Some(self.0.as_bytes()))?;
 
-            let raw = match std::fs::read_to_string(&path) {
-                Ok(i) => i,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(NbdError::Socket(format!(
-                        "Interface `{}` doesn't exist.",
-                        self.0
-                    )));
-                }
-                Err(_) => {
-                    return Err(NbdError::Socket(format!(
-                        "Unreadable device index for interface `{}`",
-                        self.0
-                    )));
-                }
+            let index = if _is_ipv6 {
+                _socket.device_index_v6()?
+            } else {
+                _socket.device_index_v4()?
             };
 
-            let n: u32 = raw.trim().parse().map_err(|_| {
-                NbdError::Socket(format!("Invalid device index for interface {}", self.0))
-            })?;
-
-            Ok(n)
+            match index {
+                Some(idx) => Ok(idx.get()),
+                None => Err(NbdError::Socket(String::from(
+                    "The socket is not bound to a local interface.",
+                ))),
+            }
         }
 
         #[cfg(not(target_os = "linux"))]

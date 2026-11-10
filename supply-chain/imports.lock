@@ -43,13 +43,6 @@ user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
 
-[[publisher.autocfg]]
-version = "1.5.1"
-when = "2026-05-22"
-user-id = 539
-user-login = "cuviper"
-user-name = "Josh Stone"
-
 [[publisher.bumpalo]]
 version = "3.20.3"
 when = "2026-05-22"
@@ -63,6 +56,11 @@ when = "2026-07-08"
 user-id = 6741
 user-login = "Darksonn"
 user-name = "Alice Ryhl"
+
+[[publisher.cc]]
+version = "1.11.1"
+when = "2026-11-06"
+trusted-publisher = "github:rust-lang/cc-rs"
 
 [[publisher.cfg-if]]
 version = "1.0.5"
@@ -119,11 +117,9 @@ user-login = "cuviper"
 user-name = "Josh Stone"
 
 [[publisher.find-msvc-tools]]
-version = "0.1.0"
-when = "2025-08-29"
-user-id = 539
-user-login = "cuviper"
-user-name = "Josh Stone"
+version = "0.1.15"
+when = "2026-10-19"
+trusted-publisher = "github:rust-lang/cc-rs"
 
 [[publisher.h2]]
 version = "0.4.20"
@@ -133,11 +129,16 @@ user-login = "seanmonstar"
 user-name = "Sean McArthur"
 
 [[publisher.hashbrown]]
-version = "0.15.2"
-when = "2024-11-25"
-user-id = 2915
-user-login = "Amanieu"
-user-name = "Amanieu d'Antras"
+version = "0.16.1"
+when = "2025-11-20"
+user-id = 55123
+user-login = "rust-lang-owner"
+
+[[publisher.hashbrown]]
+version = "0.17.1"
+when = "2026-05-09"
+user-id = 55123
+user-login = "rust-lang-owner"
 
 [[publisher.http]]
 version = "1.5.0"
@@ -196,8 +197,8 @@ user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.itoa]]
-version = "1.0.18"
-when = "2026-03-20"
+version = "1.0.19"
+when = "2026-11-09"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
@@ -208,12 +209,20 @@ when = "2026-10-01"
 user-id = 55123
 user-login = "rust-lang-owner"
 
-[[publisher.loom]]
-version = "0.7.2"
-when = "2024-04-23"
-user-id = 6741
-user-login = "Darksonn"
-user-name = "Alice Ryhl"
+[[publisher.libc]]
+version = "0.2.191"
+when = "2026-10-16"
+trusted-publisher = "github:rust-lang/libc"
+
+[[publisher.libz-sys]]
+version = "1.1.33"
+when = "2026-11-10"
+trusted-publisher = "github:rust-lang/libz-sys"
+
+[[publisher.log]]
+version = "0.4.35"
+when = "2026-10-30"
+trusted-publisher = "github:rust-lang/log"
 
 [[publisher.memchr]]
 version = "2.8.3"
@@ -264,13 +273,6 @@ user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
 
-[[publisher.scoped-tls]]
-version = "1.0.1"
-when = "2022-10-31"
-user-id = 1
-user-login = "alexcrichton"
-user-name = "Alex Crichton"
-
 [[publisher.serde]]
 version = "1.0.229"
 when = "2026-07-18"
@@ -300,8 +302,8 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.serde_spanned]]
-version = "1.1.2"
-when = "2026-10-08"
+version = "1.1.3"
+when = "2026-11-06"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
@@ -328,8 +330,8 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.syn]]
-version = "3.0.9"
-when = "2026-10-12"
+version = "3.0.10"
+when = "2026-11-09"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
@@ -377,22 +379,22 @@ user-login = "Darksonn"
 user-name = "Alice Ryhl"
 
 [[publisher.toml]]
-version = "1.2.0+spec-1.1.0"
-when = "2026-11-04"
+version = "1.2.1+spec-1.1.0"
+when = "2026-11-06"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.toml_datetime]]
-version = "1.1.2+spec-1.1.0"
-when = "2026-10-08"
+version = "1.1.3+spec-1.1.0"
+when = "2026-11-06"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.toml_edit]]
-version = "0.25.18+spec-1.1.0"
-when = "2026-11-04"
+version = "0.25.19+spec-1.1.0"
+when = "2026-11-06"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
@@ -418,13 +420,6 @@ user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
 
-[[publisher.want]]
-version = "0.3.2"
-when = "2026-10-05"
-user-id = 359
-user-login = "seanmonstar"
-user-name = "Sean McArthur"
-
 [[publisher.wasi]]
 version = "0.11.1+wasi-snapshot-preview1"
 when = "2025-06-10"
@@ -440,13 +435,6 @@ user-login = "alexcrichton"
 user-name = "Alex Crichton"
 
 [[publisher.windows-core]]
-version = "0.62.2"
-when = "2025-10-06"
-user-id = 64539
-user-login = "kennykerr"
-user-name = "Kenny Kerr"
-
-[[publisher.windows-core]]
 version = "0.100.0"
 when = "2026-09-03"
 user-id = 64539
@@ -454,22 +442,8 @@ user-login = "kennykerr"
 user-name = "Kenny Kerr"
 
 [[publisher.windows-implement]]
-version = "0.60.2"
-when = "2025-10-06"
-user-id = 64539
-user-login = "kennykerr"
-user-name = "Kenny Kerr"
-
-[[publisher.windows-implement]]
 version = "0.100.0"
 when = "2026-09-03"
-user-id = 64539
-user-login = "kennykerr"
-user-name = "Kenny Kerr"
-
-[[publisher.windows-interface]]
-version = "0.59.3"
-when = "2025-10-06"
 user-id = 64539
 user-login = "kennykerr"
 user-name = "Kenny Kerr"
@@ -496,22 +470,8 @@ user-login = "kennykerr"
 user-name = "Kenny Kerr"
 
 [[publisher.windows-result]]
-version = "0.4.1"
-when = "2025-10-06"
-user-id = 64539
-user-login = "kennykerr"
-user-name = "Kenny Kerr"
-
-[[publisher.windows-result]]
 version = "0.100.0"
 when = "2026-09-03"
-user-id = 64539
-user-login = "kennykerr"
-user-name = "Kenny Kerr"
-
-[[publisher.windows-strings]]
-version = "0.5.1"
-when = "2025-10-06"
 user-id = 64539
 user-login = "kennykerr"
 user-name = "Kenny Kerr"
@@ -597,12 +557,6 @@ who = "Dan Gohman <dev@sunfishcode.online>"
 criteria = "safe-to-deploy"
 delta = "0.3.9 -> 0.3.10"
 
-[[audits.bytecode-alliance.audits.find-msvc-tools]]
-who = "Alex Crichton <alex@alexcrichton.com>"
-criteria = "safe-to-deploy"
-delta = "0.1.0 -> 0.1.4"
-notes = "Nothing out of the ordinary for a crate finding MSVC tooling."
-
 [[audits.bytecode-alliance.audits.foldhash]]
 who = "Alex Crichton <alex@alexcrichton.com>"
 criteria = "safe-to-deploy"
@@ -611,6 +565,26 @@ notes = """
 Only a minor amount of `unsafe` code in this crate related to global per-process
 initialization which looks correct to me.
 """
+
+[[audits.bytecode-alliance.audits.futures]]
+who = "Joel Dice <joel.dice@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.3.31"
+
+[[audits.bytecode-alliance.audits.futures]]
+who = "Pat Hickey <p.hickey@f5.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.34"
+
+[[audits.bytecode-alliance.audits.futures-channel]]
+who = "Joel Dice <joel.dice@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.3.31"
+
+[[audits.bytecode-alliance.audits.futures-channel]]
+who = "Pat Hickey <p.hickey@f5.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.34"
 
 [[audits.bytecode-alliance.audits.futures-core]]
 who = "Pat Hickey <phickey@fastly.com>"
@@ -623,16 +597,67 @@ who = "Pat Hickey <pat@moreproductive.org>"
 criteria = "safe-to-deploy"
 delta = "0.3.28 -> 0.3.31"
 
+[[audits.bytecode-alliance.audits.futures-executor]]
+who = "Joel Dice <joel.dice@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.3.31"
+
+[[audits.bytecode-alliance.audits.futures-executor]]
+who = "Pat Hickey <p.hickey@f5.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.34"
+
+[[audits.bytecode-alliance.audits.futures-io]]
+who = "Joel Dice <joel.dice@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.3.31"
+
+[[audits.bytecode-alliance.audits.futures-io]]
+who = "Pat Hickey <p.hickey@f5.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.34"
+
+[[audits.bytecode-alliance.audits.futures-macro]]
+who = "Joel Dice <joel.dice@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.3.31"
+
+[[audits.bytecode-alliance.audits.futures-macro]]
+who = "Pat Hickey <p.hickey@f5.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.34"
+
+[[audits.bytecode-alliance.audits.futures-sink]]
+who = "Pat Hickey <phickey@fastly.com>"
+criteria = "safe-to-deploy"
+version = "0.3.27"
+
+[[audits.bytecode-alliance.audits.futures-sink]]
+who = "Pat Hickey <pat@moreproductive.org>"
+criteria = "safe-to-deploy"
+delta = "0.3.28 -> 0.3.31"
+
+[[audits.bytecode-alliance.audits.futures-sink]]
+who = "Pat Hickey <p.hickey@f5.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.34"
+
+[[audits.bytecode-alliance.audits.futures-task]]
+who = "Pat Hickey <pat@moreproductive.org>"
+criteria = "safe-to-deploy"
+delta = "0.3.27 -> 0.3.31"
+
+[[audits.bytecode-alliance.audits.futures-util]]
+who = "Pat Hickey <pat@moreproductive.org>"
+criteria = "safe-to-deploy"
+delta = "0.3.27 -> 0.3.31"
+notes = 'New waker_ref module contains "FIXME: panics on Arc::clone / refcount changes could wreak havoc..." comment, but this corner case feels low risk.'
+
 [[audits.bytecode-alliance.audits.heck]]
 who = "Alex Crichton <alex@alexcrichton.com>"
 criteria = "safe-to-deploy"
 delta = "0.4.1 -> 0.5.0"
 notes = "Minor changes for a `no_std` upgrade but otherwise everything looks as expected."
-
-[[audits.bytecode-alliance.audits.iana-time-zone-haiku]]
-who = "Dan Gohman <dev@sunfishcode.online>"
-criteria = "safe-to-deploy"
-version = "0.1.2"
 
 [[audits.bytecode-alliance.audits.matchers]]
 who = "Pat Hickey <phickey@fastly.com>"
@@ -701,6 +726,12 @@ criteria = "safe-to-deploy"
 version = "1.1.0"
 notes = "Only minor `unsafe` code blocks which look valid and otherwise does what it says on the tin."
 
+[[audits.bytecode-alliance.audits.tracing-attributes]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.28 -> 0.1.30"
+notes = "Few code changes, a pretty minor update."
+
 [[audits.bytecode-alliance.audits.tracing-core]]
 who = "Alex Crichton <alex@alexcrichton.com>"
 criteria = "safe-to-deploy"
@@ -722,6 +753,11 @@ criteria = "safe-to-deploy"
 delta = "0.1.3 -> 0.2.0"
 notes = "Nothing out of the ordinary, a typical major version update and nothing awry."
 
+[[audits.bytecode-alliance.audits.tracing-subscriber]]
+who = "Pat Hickey <phickey@fastly.com>"
+criteria = "safe-to-deploy"
+version = "0.3.17"
+
 [[audits.bytecode-alliance.audits.try-lock]]
 who = "Pat Hickey <phickey@fastly.com>"
 criteria = "safe-to-deploy"
@@ -734,6 +770,17 @@ criteria = "safe-to-deploy"
 version = "0.2.15"
 notes = "no build.rs, no macros, no unsafe. It reads the filesystem and makes copies of DLLs into OUT_DIR."
 
+[[audits.bytecode-alliance.audits.want]]
+who = "Pat Hickey <phickey@fastly.com>"
+criteria = "safe-to-deploy"
+version = "0.3.0"
+
+[[audits.bytecode-alliance.audits.want]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.0 -> 0.3.2"
+notes = "Mostly idiom-related changes, nothing major."
+
 [[audits.bytecode-alliance.audits.zeroize]]
 who = "Pat Hickey <p.hickey@f5.com>"
 criteria = "safe-to-deploy"
@@ -743,13 +790,6 @@ delta = "1.8.1 -> 1.8.2"
 who = "amarjotgill <amarjotgill@google.com>"
 criteria = "safe-to-deploy"
 version = "0.22.1"
-aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
-
-[[audits.google.audits.core-foundation-sys]]
-who = "Manish Goregaokar <manishearth@google.com>"
-criteria = "safe-to-deploy"
-version = "0.8.7"
-notes = "OSX system APIs"
 aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
 
 [[audits.google.audits.foldhash]]
@@ -765,6 +805,13 @@ criteria = "safe-to-deploy"
 delta = "0.1.4 -> 0.1.5"
 notes = "No new `unsafe`."
 aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
+
+[[audits.google.audits.getrandom]]
+who = "David Koloski <dkoloski@google.com>"
+criteria = "safe-to-deploy"
+delta = "0.2.2 -> 0.2.12"
+notes = "Audited at https://fxrev.dev/932979"
+aggregated-from = "https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/third_party/rust_crates/supply-chain/audits.toml?format=TEXT"
 
 [[audits.google.audits.heck]]
 who = "Lukasz Anforowicz <lukasza@chromium.org>"
@@ -871,6 +918,53 @@ version = "0.2.1"
 notes = "Reviewed on https://fxrev.dev/904811"
 aggregated-from = "https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/third_party/rust_crates/supply-chain/audits.toml?format=TEXT"
 
+[[audits.isrg.audits.getrandom]]
+who = "David Cook <dcook@divviup.org>"
+criteria = "safe-to-deploy"
+delta = "0.2.12 -> 0.2.14"
+
+[[audits.isrg.audits.getrandom]]
+who = "David Cook <dcook@divviup.org>"
+criteria = "safe-to-deploy"
+delta = "0.2.14 -> 0.2.15"
+
+[[audits.isrg.audits.getrandom]]
+who = "David Cook <dcook@divviup.org>"
+criteria = "safe-to-deploy"
+delta = "0.3.3 -> 0.3.4"
+
+[[audits.isrg.audits.once_cell]]
+who = "Brandon Pitman <bran@bran.land>"
+criteria = "safe-to-deploy"
+delta = "1.17.1 -> 1.17.2"
+
+[[audits.isrg.audits.once_cell]]
+who = "David Cook <dcook@divviup.org>"
+criteria = "safe-to-deploy"
+delta = "1.17.2 -> 1.18.0"
+
+[[audits.isrg.audits.once_cell]]
+who = "Brandon Pitman <bran@bran.land>"
+criteria = "safe-to-deploy"
+delta = "1.18.0 -> 1.19.0"
+
+[[audits.isrg.audits.once_cell]]
+who = "David Cook <dcook@divviup.org>"
+criteria = "safe-to-deploy"
+delta = "1.19.0 -> 1.20.1"
+
+[[audits.isrg.audits.once_cell]]
+who = "J.C. Jones <jc@insufficient.coffee>"
+criteria = "safe-to-deploy"
+delta = "1.21.1 -> 1.21.3"
+notes = "The unsafe code has moved from `compare_exchange` to a new `init` function, which makes it easier to reason about."
+
+[[audits.isrg.audits.once_cell]]
+who = "J.C. Jones <jc@divviup.org>"
+criteria = "safe-to-deploy"
+delta = "1.21.3 -> 1.21.4"
+notes = "The addition is a safe while loop around prior behavior. I don't see any way for that to become malicious."
+
 [[audits.isrg.audits.rand_chacha]]
 who = "David Cook <dcook@divviup.org>"
 criteria = "safe-to-deploy"
@@ -891,25 +985,6 @@ who = "Mike Hommey <mh+mozilla@glandium.org>"
 criteria = "safe-to-deploy"
 delta = "0.3.1 -> 0.3.3"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.find-msvc-tools]]
-who = "Jan-Erik Rediger <jrediger@mozilla.com>"
-criteria = "safe-to-deploy"
-delta = "0.1.4 -> 0.1.8"
-aggregated-from = "https://raw.githubusercontent.com/mozilla/glean/main/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.find-msvc-tools]]
-who = "Emilio Cobos Álvarez <emilio@crisal.io>"
-criteria = "safe-to-deploy"
-delta = "0.1.8 -> 0.1.12"
-notes = "Pretty minor changes, no new unsafe code."
-aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.find-msvc-tools]]
-who = "Alex Franchuk <afranchuk@mozilla.com>"
-criteria = "safe-to-deploy"
-delta = "0.1.12 -> 0.1.15"
-aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.fnv]]
 who = "Bobby Holley <bobbyholley@gmail.com>"
@@ -936,34 +1011,145 @@ criteria = "safe-to-deploy"
 delta = "0.3.31 -> 0.3.34"
 aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
 
-[[audits.mozilla.audits.hashbrown]]
-who = "Erich Gubler <erichdongubler@gmail.com>"
+[[audits.mozilla.audits.futures-sink]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
 criteria = "safe-to-deploy"
-delta = "0.15.2 -> 0.15.5"
+delta = "0.3.27 -> 0.3.28"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
-[[audits.mozilla.audits.hashbrown]]
-who = "Erich Gubler <erichdongubler@gmail.com>"
+[[audits.mozilla.audits.futures-task]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
 criteria = "safe-to-deploy"
-delta = "0.15.5 -> 0.16.0"
+delta = "0.3.21 -> 0.3.23"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
-[[audits.mozilla.audits.hashbrown]]
-who = "Erich Gubler <erichdongubler@gmail.com>"
+[[audits.mozilla.audits.futures-task]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
 criteria = "safe-to-deploy"
-delta = "0.16.0 -> 0.16.1"
+delta = "0.3.23 -> 0.3.25"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
-[[audits.mozilla.audits.hashbrown]]
-who = "Erich Gubler <erichdongubler@gmail.com>"
+[[audits.mozilla.audits.futures-task]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
 criteria = "safe-to-deploy"
-delta = "0.16.1 -> 0.17.0"
+delta = "0.3.25 -> 0.3.26"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
-[[audits.mozilla.audits.hashbrown]]
+[[audits.mozilla.audits.futures-task]]
+who = "Lars Eggert <lars@eggert.org>"
+criteria = "safe-to-deploy"
+delta = "0.3.26 -> 0.3.27"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.futures-task]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.34"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.futures-util]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "0.3.21 -> 0.3.23"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.futures-util]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "0.3.23 -> 0.3.25"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.futures-util]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "0.3.25 -> 0.3.26"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.futures-util]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "0.3.26 -> 0.3.28"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.futures-util]]
+who = "Lars Eggert <lars@eggert.org>"
+criteria = "safe-to-deploy"
+delta = "0.3.28 -> 0.3.27"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.futures-util]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.31 -> 0.3.34"
+notes = "Minor changes, with a bit of unsafe, but sound, code added."
+aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.getrandom]]
+who = "Chris Martin <cmartin@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.2.15 -> 0.3.1"
+notes = """
+I've looked over all unsafe code, and it appears to be safe, fully initializing the rng buffers.
+In addition, I've checked Linux, Windows, Mac, and Android more thoroughly against API
+documentation.
+"""
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.getrandom]]
+who = "Emilio Cobos Álvarez <emilio@crisal.io>"
+criteria = "safe-to-deploy"
+delta = "0.3.1 -> 0.3.3"
+notes = """
+Biggest non-trivial change is a new UEFI back-end, which looks reasonable to
+the best of my ability: There's some trickiness on initialization but doesn't
+look unsafe, at worse it leaks, and it might not if the relevant pointers are
+static/non-owning. Other changes also look reasonable too: some tweaks to
+inlining and a syscall-based linux back-end, whose relevant unsafe code looks
+reasonable.
+"""
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.ipnet]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "2.5.0 -> 2.12.2"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.once_cell]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "1.12.0 -> 1.13.1"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.once_cell]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "1.13.1 -> 1.16.0"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.once_cell]]
+who = "Mike Hommey <mh+mozilla@glandium.org>"
+criteria = "safe-to-deploy"
+delta = "1.16.0 -> 1.17.1"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.once_cell]]
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
-delta = "0.17.0 -> 0.17.1"
+delta = "1.20.1 -> 1.20.2"
+notes = "This update works around a Cargo bug that forces the addition of `portable-atomic` into a lockfile, which we have never needed to use."
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.once_cell]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.20.2 -> 1.20.3"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.once_cell]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.20.3 -> 1.21.1"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.pkg-config]]
@@ -1017,6 +1203,42 @@ criteria = "safe-to-deploy"
 delta = "0.10.0 -> 0.11.1"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
+[[audits.mozilla.audits.tower-service]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.1 -> 0.3.3"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tracing]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "0.1.37"
+notes = """
+There's only one unsafe impl, and its purpose is to ensure correct behavior by
+creating a non-Send marker type (it has nothing to do with soundness). All
+dependencies make sense, and no side-effectful std functions are used.
+"""
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tracing]]
+who = "Mark Hammond <mhammond@skippinet.com.au>"
+criteria = "safe-to-deploy"
+delta = "0.1.37 -> 0.1.41"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tracing-attributes]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "0.1.24"
+notes = "No unsafe code, macros extensively tested and produce reasonable code."
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tracing-attributes]]
+who = "Mark Hammond <mhammond@skippinet.com.au>"
+criteria = "safe-to-deploy"
+delta = "0.1.24 -> 0.1.28"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
 [[audits.mozilla.audits.tracing-core]]
 who = "Alex Franchuk <afranchuk@mozilla.com>"
 criteria = "safe-to-deploy"
@@ -1039,6 +1261,18 @@ who = "Alex Franchuk <afranchuk@mozilla.com>"
 criteria = "safe-to-deploy"
 delta = "0.1.34 -> 0.1.36"
 aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tracing-subscriber]]
+who = "Mark Hammond <mhammond@skippinet.com.au>"
+criteria = "safe-to-deploy"
+delta = "0.3.17 -> 0.3.19"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tracing-subscriber]]
+who = "Mark Hammond <mhammond@skippinet.com.au>"
+criteria = "safe-to-deploy"
+delta = "0.3.19 -> 0.3.20"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.utf8parse]]
 who = "Nika Layzell <nika@thelayzells.com>"
@@ -1094,9 +1328,22 @@ criteria = "safe-to-deploy"
 delta = "0.3.13 -> 0.3.14"
 aggregated-from = "https://raw.githubusercontent.com/zcash/librustzcash/main/supply-chain/audits.toml"
 
+[[audits.zcash.audits.r-efi]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "5.2.0 -> 5.3.0"
+aggregated-from = "https://raw.githubusercontent.com/zcash/wallet/main/supply-chain/audits.toml"
+
 [[audits.zcash.audits.try-lock]]
 who = "Jack Grigg <jack@electriccoin.co>"
 criteria = "safe-to-deploy"
 delta = "0.2.4 -> 0.2.5"
 notes = "Bumps MSRV to remove unsafe code block."
+aggregated-from = "https://raw.githubusercontent.com/zcash/zcash/master/qa/supply-chain/audits.toml"
+
+[[audits.zcash.audits.valuable]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.1.0 -> 0.1.1"
+notes = "Build script changes are for linting."
 aggregated-from = "https://raw.githubusercontent.com/zcash/zcash/master/qa/supply-chain/audits.toml"

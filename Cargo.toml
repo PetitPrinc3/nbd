@@ -29,7 +29,7 @@ secrecy = { version = "0.10.3", features = ["serde"] }
 arc-swap = "1.9.3"
 
 [build-dependencies]
-chrono = "0.4.45"
+chrono = { version = "0.4.45", default-features = false, features = ["now"] }
 
 [profile.release]
 overflow-checks = true
