@@ -28,7 +28,7 @@ NBD doesn't authenticate the multicast feed: it relays what it receives and assu
 
 Each `[[provider]]` of the configuration maps one multicast group and port to one Kafka topic.
 
-![Each multicast group is received by a provider, which submits its datagrams to a sink. In production, the sink delivers them to the Kafka broker through librdkafka. An optional Prometheus exporter runs alongside.](./images/NBD_Operating_Principle.svg)
+![Each multicast group is received by a provider, which hands its datagrams to a ManagedProducer shared by all providers. The ManagedProducer delivers them to the Kafka broker through librdkafka. A supervisor rebuilds the producer after a fatal error, and a reaper thread destroys the old one. An optional Prometheus exporter runs alongside.](./images/NBD_Operating_Principle.svg)
 
 A provider is a Tokio task that owns one UDP socket. It reads datagrams into a preallocated buffer and submits them to Kafka without blocking. When the producer queue is full, the datagram is dropped and counted.
 
@@ -115,7 +115,7 @@ nbd --config-file config.toml
 
 ## Platforms
 
-Linux x86_64 is the reference platform. Windows x86_64 is supported, with these differences:
+Linux x86_64 is the reference platform. It needs Linux 5.1 or later, and 5.7 or later to run without `CAP_NET_RAW`. Windows x86_64 is supported, with these differences:
 
 - `interface` is an interface index, not a name
 - sockets are bound to the wildcard address, without per-group or per-interface isolation

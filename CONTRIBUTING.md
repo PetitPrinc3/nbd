@@ -67,7 +67,7 @@ cargo test --test simple_latency -- --nocapture
 cargo test --release --test stress -- --nocapture
 ```
 
-`NBD_TEST_INTERFACE` must be the interface that carries your multicast route. It defaults to `lo` on Linux and to index `1` elsewhere.
+`NBD_TEST_INTERFACE` must be the interface that carries your multicast route. It defaults to `lo` on Linux and to index `1` elsewhere. `stress`, `spike` and the two `multi_channel` tests fail when they receive nothing.
 
 Run `simple_latency` before a pull request. Run the benchmarks if your change touches `providers.rs`, `sinks.rs` or `kafka.rs`, and add the results to the pull request, see [Reproducing the benchmarks](PERFORMANCE.md#reproducing-the-benchmarks). A bare `cargo test --all-features` runs everything, in more than 15 minutes.
 

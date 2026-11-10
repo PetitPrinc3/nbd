@@ -1643,12 +1643,18 @@ impl Interface {
 
     /// Returns the index of the interface.
     ///
-    /// On Linux, it is read from `/sys/class/net/<name>/ifindex`. On other systems, the value is the
+    /// On Linux, a temporary UDP socket of the family given by `is_ipv6` is bound to the interface
+    /// (`SO_BINDTODEVICE`), the index is read back from it (`SO_BINDTOIFINDEX`, Linux 5.1 or
+    /// later), then the socket is closed. Each call binds a new socket once, which an unprivileged
+    /// process may do since Linux 5.7. On other systems, `is_ipv6` is ignored and the value is the
     /// index.
     ///
     /// # Errors
     ///
-    /// Returns [`NbdError::Socket`] when the interface doesn't exist or its index cannot be read.
+    /// Returns [`NbdError::Network`] when the temporary socket can't be created, for instance
+    /// because IPv6 is unavailable, or can't be bound to the interface, for instance because it
+    /// doesn't exist. Returns [`NbdError::Socket`] when the index can't be read back, or the value
+    /// isn't a valid index on other systems.
     pub fn index(&self, _is_ipv6: bool) -> Result<u32, NbdError> {
         #[cfg(target_os = "linux")]
         {

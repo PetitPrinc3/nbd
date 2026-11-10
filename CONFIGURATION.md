@@ -20,7 +20,7 @@ See [PRODUCTION.md](PRODUCTION.md) for how to choose these values.
 
 Validation stops at the first section or provider that fails, so fixing a file can take several passes.
 
-`--check-config-file` checks the file permissions, validates the file, resolves the broker address and submits the settings to `librdkafka`. It doesn't contact the broker or create the multicast sockets, so these errors only appear at startup:
+`--check-config-file` checks the file permissions, validates the file, resolves the broker address and submits the settings to `librdkafka`. On Linux, it binds a temporary socket to each provider interface to check it. It doesn't bind a port, join a group or contact the broker, so these errors only appear at startup:
 
 - `socket_buffer_size` above `net.core.rmem_max`
 - a provider or metrics port that can't be bound, or a group that can't be joined
@@ -179,7 +179,7 @@ Repeatable. At least one is required.
 | `topic` | string | required | Kafka topic. 1 to 249 characters among `[a-zA-Z0-9._-]`, except `.` and `..`. |
 | `group` | IP address | required | Multicast group, IPv4 or IPv6. |
 | `port` | integer | required | UDP port. Not `0`. Ports below 1024 need `CAP_NET_BIND_SERVICE`. |
-| `interface` | string | required | Interface name on Linux (`"eth0"`), which must exist. Index on other systems (`"2"`, not `"0"`). At most 15 characters among `[a-zA-Z0-9._-]`. An IP address is refused. |
+| `interface` | string | required | Interface name on Linux (`"eth0"`), checked by binding a socket to it (`SO_BINDTODEVICE`). Index on other systems (`"2"`, not `"0"`). At most 15 characters among `[a-zA-Z0-9._-]`. An IP address is refused. |
 
 Datagrams can be up to 65,527 bytes, the maximum UDP payload over IPv6.
 
@@ -195,7 +195,7 @@ Requires the `metrics-exporter` feature. Without this section, the exporter does
 
 ## Secret sources
 
-A parameter of type secret takes one of three forms:
+A parameter of type secret takes exactly one of three forms. Unknown keys, or `env` and `file` together, are refused.
 
 ```toml
 password = "my-secret"                           # literal

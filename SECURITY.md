@@ -41,9 +41,9 @@ The daemon's Rust code is memory-safe, with `unsafe` forbidden. The C code of `l
 - `Cargo.lock` is tracked and every CI build uses `--locked`.
 - `cargo audit` and `cargo deny check` run on every push and pull request to `main`, every day, and before a release. `deny.toml` restricts sources to `crates.io` and bans `bindgen` and unvetted native build tools.
 - `cargo vet` requires every crate to be covered by an audit, a trusted publisher or an exemption. That doesn't make them all reviewed:
-  - 65 of the 177 third-party crates are exempted, including 9 of the 17 direct dependencies (`arc-swap`, `chrono`, `futures`, `metrics`, `metrics-exporter-prometheus`, `rdkafka`, `secrecy`, `tracing`, `tracing-subscriber`)
-  - 78 entries trust a publisher rather than a review
-  - 6 of the 7 local certifications record that others trust the publisher, not a review of the code
+  - `cargo vet` reports 46 of the 168 third-party crates as exempted, including 2 of the 17 direct dependencies: `chrono` (build only) and `rdkafka`. 9 more are partially audited: a delta audit on top of an exempted version
+  - 69 entries trust a publisher rather than a review
+  - the 8 local audits are recorded as made by the maintainer with Claude Opus 5.5. They are full reviews of `arc-swap`, `metrics` and `secrecy`, a review of `metrics-exporter-prometheus` limited to the features NBD uses, and delta reviews of `smallvec`, `tracing`, `tracing-attributes` and `tracing-subscriber`
 - Actions are pinned by commit, workflows default to read-only permissions and don't persist checkout credentials, and audit tools are pinned. Dependabot proposes updates weekly.
 - `release.yml` re-runs the formatting, lint, configuration test and supply chain gates before building. Binaries are published with `SHA256SUMS` and build provenance attestations. `SHA256SUMS` itself isn't attested.
 - The release profile keeps `overflow-checks = true` and sets `strip = "symbols"`.
@@ -96,8 +96,8 @@ Several rules rely on `clippy` lints declared with `#![deny(...)]` in `src/main.
 
 | Rule | Requirement | Status | Evidence |
 |---|---|---|---|
-| `LIBS-VETTING-DIRECT` | Validate direct dependencies | ⚠️ | `cargo vet --locked` tracks validation and `deny.toml` restricts sources. 8 of 17 direct dependencies rest on trusted publishers, the other 9 are exemptions. |
-| `LIBS-VETTING-TRANSITIVE` | Validate transitive dependencies | ⚠️ | Same tools. 65 of 177 third-party crates are exempted in `supply-chain/config.toml`. |
+| `LIBS-VETTING-DIRECT` | Validate direct dependencies | ⚠️ | `cargo vet --locked` tracks validation and `deny.toml` restricts sources. Of the 17 direct dependencies, 7 are covered by audits (6 local, 1 imported), 8 by trusted publishers, and 2 are exemptions: `chrono` and `rdkafka`. |
+| `LIBS-VETTING-TRANSITIVE` | Validate transitive dependencies | ⚠️ | Same tools. `cargo vet` reports 46 of 168 third-party crates as exempted and 9 as partially audited, through the exemptions of `supply-chain/config.toml`. |
 | `LIBS-OUTDATED` | Check for outdated dependencies | ✅ | `cargo outdated --exit-code 1` on every push and pull request to `main`. Skipped on the daily run, not a gate of `release.yml`. |
 | `LIBS-AUDIT` | Check for known vulnerabilities | ✅ | `cargo audit` in `audit.yml`, including daily, and in `release.yml`. Informational advisories are left to `cargo deny`. |
 

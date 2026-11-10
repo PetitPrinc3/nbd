@@ -196,7 +196,6 @@ deny = [
     #{ crate = "ansi_term@0.11.0", wrappers = ["this-crate-directly-depends-on-ansi_term"] },
     # C wrappers dependancy checks for ANSSI requirements, allow :
     # - cmake/libz-sys : rdkafka compilation requirements (at build time only)
-    # - iana-time-zone-haiku : chrono requirement (at build time only) 
     # - generator : prometheus exporter requirement (at build time only)
     # - rdkafka : project dependancy
     { crate = "cc", wrappers = ["cmake", "sasl2-sys", "openssl-sys", "curl-sys", "libz-sys", "generator"] },

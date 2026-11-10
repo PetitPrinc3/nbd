@@ -22,6 +22,8 @@ NBD needs no root access and no Linux capability, provided that:
 - `net.core.rmem_max` allows `socket_buffer_size`
 - the kernel is 5.7 or later, which allows `SO_BINDTODEVICE` without `CAP_NET_RAW`
 
+This also applies to `--check-config-file`, which binds a temporary socket to each interface.
+
 ### File layout
 
 | Path | Owner | Mode | Notes |
