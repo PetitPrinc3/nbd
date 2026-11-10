@@ -100,7 +100,7 @@ criteria = "safe-to-deploy"
 notes = "P5-P8: transitive dependency, vetting pending."
 
 [[exemptions.loom]]
-version = "0.7.2"
+version = "0.7.3"
 criteria = "safe-to-deploy"
 notes = "Not built for NBD's release targets (x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc), only under cfg(loom) / cfg(crossbeam_loom)."
 

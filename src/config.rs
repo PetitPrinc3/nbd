@@ -394,42 +394,32 @@ impl ProviderConfig {
         }
 
         match raw_provider_config.interface {
-            Some(interface) => {
-                let is_ipv6 = provider_config.group.is_ipv6();
-                let socket = Socket::new(
-                    if is_ipv6 { Domain::IPV6 } else { Domain::IPV4 },
-                    Type::DGRAM,
-                    Some(Protocol::UDP),
-                )?;
-
-                match interface.index(&socket, is_ipv6) {
-                    Ok(index) => {
-                        if index == 0 {
-                            error!(
-                                "The `provider.{}.interface` is invalid as use of the default interface (0) is forbidden.",
-                                idx
-                            );
-                            errors.push(String::from("forbidden interface value"));
-                        } else {
-                            debug!(
-                                "The `provider.{}.interface` is correctly set to a valid interface.",
-                                idx
-                            );
-
-                            provider_config.interface = interface;
-                        }
-                    }
-                    Err(e) => {
+            Some(interface) => match interface.index(provider_config.group.is_ipv6()) {
+                Ok(index) => {
+                    if index == 0 {
                         error!(
-                            "The `provider.{}.interface` parameter is invalid : {}",
-                            idx, e
+                            "The `provider.{}.interface` is invalid as use of the default interface (0) is forbidden.",
+                            idx
                         );
-                        errors.push(String::from("invalid interface"));
+                        errors.push(String::from("forbidden interface value"));
+                    } else {
+                        debug!(
+                            "The `provider.{}.interface` is correctly set to a valid interface.",
+                            idx
+                        );
+
+                        provider_config.interface = interface;
                     }
                 }
+                Err(e) => {
+                    error!(
+                        "The `provider.{}.interface` parameter is invalid : {}",
+                        idx, e
+                    );
+                    errors.push(String::from("invalid interface"));
+                }
+            },
 
-                drop(socket);
-            }
             None => {
                 error!("The `provider.{}.interface` parameter is missing.", idx);
                 errors.push(String::from("missing interface"));
@@ -1659,22 +1649,31 @@ impl Interface {
     /// # Errors
     ///
     /// Returns [`NbdError::Socket`] when the interface doesn't exist or its index cannot be read.
-    pub fn index(&self, _socket: &Socket, _is_ipv6: bool) -> Result<u32, NbdError> {
+    pub fn index(&self, _is_ipv6: bool) -> Result<u32, NbdError> {
         #[cfg(target_os = "linux")]
         {
-            _socket.bind_device(Some(self.0.as_bytes()))?;
+            let socket = Socket::new(
+                if _is_ipv6 { Domain::IPV6 } else { Domain::IPV4 },
+                Type::DGRAM,
+                Some(Protocol::UDP),
+            )?;
+
+            socket.bind_device(Some(self.0.as_bytes()))?;
 
             let index = if _is_ipv6 {
-                _socket.device_index_v6()?
+                socket.device_index_v6()
             } else {
-                _socket.device_index_v4()?
+                socket.device_index_v4()
             };
 
+            drop(socket);
+
             match index {
-                Some(idx) => Ok(idx.get()),
-                None => Err(NbdError::Socket(String::from(
-                    "The socket is not bound to a local interface.",
+                Ok(Some(idx)) => Ok(idx.get()),
+                Ok(None) => Err(NbdError::Socket(String::from(
+                    "the socket is not bound to a local interface.",
                 ))),
+                Err(e) => Err(NbdError::Socket(format!("{}", e))),
             }
         }
 

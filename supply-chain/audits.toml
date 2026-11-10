@@ -4,8 +4,8 @@
 [[audits.arc-swap]]
 who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
-version = "1.9.3"
-notes = "Full review of the default build (lib, ref_cnt, debt, strategy/hybrid, access, cache, as_raw) and of the weak, serde and rwlock-strategy features. No build script, I/O, FFI, environment or process access. Each unsafe upholds its stated invariant: RefCnt conversions keep counts balanced; debt nodes are leaked and never freed, so raw traversal and Handover dereferences stay valid; pay_all and HybridProtection balance counts on every path, panics included; generation wrap-around triggers a cooldown (ABA). No manual Send/Sync. Bounded leak of one node per concurrent thread. RUSTSEC-2020-0091 fixed since 1.1.0. The SeqCst memory-model argument was not re-derived."
+version = "1.9.5"
+notes = "Full review of the 1.9.3 code base (lib, ref_cnt, debt, strategy/hybrid, access, cache, as_raw; weak, serde and rwlock-strategy features) plus the 1.9.3 -> 1.9.5 delta. 1.9.4 tags debts with RefCnt::TAG so Arc and Weak debts on one allocation no longer collide (#214); every debt write and comparison uses Debt::encode and every storing entry point calls check_tag. 1.9.5 keys unconfirmed debts to their storage so writers of other instances skip debts naming a reused address (#210); the helping slot carries the key, the fast path clears it on confirmation, and confirmed helping debts become full counts before load returns, so a moved ArcSwap stays correct. The storage word is published by the SeqCst pointer swap. No new dependency, build script, I/O or FFI. #210 is still open upstream pending the reporter's confirmation; the global SeqCst memory-model argument was not re-derived."
 
 [[audits.metrics]]
 who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
@@ -24,6 +24,12 @@ who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
 version = "0.10.3"
 notes = "Full review (204 lines). forbid(unsafe_code), no_std, no build script, depends only on zeroize (serde optional). Debug redacts, zeroize on drop. Known limit: From<String> uses into_boxed_str(), which may reallocate and leave the old buffer unzeroized; deserialization leaves intermediate copies."
+
+[[audits.smallvec]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "1.16.4 -> 1.16.5"
+notes = "Comment reflow and Cargo.toml formatting only, no code change. Publisher alejandro-vaz (crates.io owner) verified: 1.16.5 is tag v1.16.5 on branch v1 of github.com/servo/rust-smallvec (commit 6e900059, PR #853); the published src/lib.rs, README.md and Cargo.toml match that commit byte for byte."
 
 [[audits.tracing]]
 who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
