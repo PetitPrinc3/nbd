@@ -35,12 +35,13 @@ notes = "P5-P8: transitive dependency, vetting pending."
 [[exemptions.curl-sys]]
 version = "0.4.91+curl-8.22.0"
 criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
-[[exemptions.duct]]
-version = "0.13.7"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
+notes = """
+Audit policy : Rust and build reviewed, bundled C exempted.
+Only built with NBD's `kafka-auth-oauth` feature (librdkafka's OIDC token request).
+Rust: lib.rs holds extern declarations, integer aliases for C enums, opaque types and two safe functions, no unsafe code. Neither NBD nor rdkafka-sys calls the declarations: rdkafka-sys only links libcurl through DEP_CURL_ROOT.
+build.rs: links the system libcurl when pkg-config (Linux) or vcpkg (Windows MSVC) finds it, otherwise compiles the bundled curl with cc. No network access, writes only under OUT_DIR. It always runs `git submodule update --init curl` in the crate directory (the packaged crate has no curl/.git) and ignores the result.
+C: bundled curl is byte-identical to upstream tag curl-8_22_0, commit 01346829096c61b372692f6dc43ffa778c6caccd (755 files compared, tests and docs not shipped). Bundled build: no HTTP/2, TLS through OpenSSL (Linux) or Schannel (Windows). curl 8.23.0 (2026-10-14) fixes 24 CVEs affecting 8.22.0. The High one (CVE-2026-92392, HTTP/2) is not compiled in. The 23 Low ones were triaged by title, and none matched librdkafka's use (http/https only, no redirects, own Authorization header). Update when a curl-sys release bundles curl >= 8.23.0. Tracked separately (CVE watch), not reviewed.
+"""
 
 [[exemptions.evmap]]
 version = "11.0.0"
@@ -107,16 +108,6 @@ version = "1.12.0"
 criteria = "safe-to-deploy"
 notes = "P5-P8: transitive dependency, vetting pending."
 
-[[exemptions.openssl-sys]]
-version = "0.9.118"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
-[[exemptions.os_pipe]]
-version = "1.2.3"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
 [[exemptions.portable-atomic]]
 version = "1.15.0"
 criteria = "safe-to-deploy"
@@ -155,32 +146,29 @@ notes = "P5-P8: transitive dependency, vetting pending."
 [[exemptions.rdkafka-sys]]
 version = "4.10.0+2.12.1"
 criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
+notes = """
+Audit policy : Rust and build reviewed, bundled C exempted.
+Rust: src/bindings.rs is bindgen output; its only `unsafe` tokens are `unsafe extern "C" fn` pointer types. The two unsafe blocks in types.rs (Display) are sound: the code is validated with try_from first, and rd_kafka_err2str never returns NULL.
+build.rs (cmake-build path, used by NBD): CMake on the bundled librdkafka with tests and examples off, no network access, writes only under target/. The `./configure` path (mklove, can download modules) is not used by NBD.
+C: bundled librdkafka is byte-identical to upstream tag v2.12.1, commit e1db7eaa517f0a6438bc846a9c49ede73b9ea211 (698 files compared). No CVE known on 2026-11-10. Tracked separately (CVE watch), not reviewed.
+Known issue: rd_kafka_resp_err_t is a #[repr(i32)] Rust enum and librdkafka passes unknown broker error codes through to delivery reports, so a code unknown to librdkafka 2.12.1 is UB (crash observed, fede1024/rust-rdkafka#127). See SECURITY.md.
+"""
 
 [[exemptions.sasl2-sys]]
 version = "0.1.22+2.1.28"
 criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
+notes = """
+Audit policy : Rust and build reviewed, bundled C exempted.
+Only built with NBD's `kafka-auth-gssapi` feature.
+Rust: extern declarations, constants and fn-pointer types, no unsafe block. rdkafka-sys only links it (`extern crate sasl2_sys`).
+build.rs: NBD leaves `vendored` off, so only find_sasl runs: SASL2_LIB_DIR/SASL2_INCLUDE_DIR or SASL2_DIR, then pkg-config, then /usr and /usr/local. It preprocesses version.c to require libsasl2 2.1.26 to 2.1.28 and links the system library. No network access. The vendored path (copy of sasl2/ into OUT_DIR, configure and make through duct) never runs; deny.toml forbids the feature.
+C: system libsasl2 (Cyrus SASL), patched by the distribution. Upstream 2.1.26 and 2.1.27 are affected by CVE-2019-19906 and CVE-2022-24407, fixed in 2.1.28 or by distribution backports.
+"""
 
 [[exemptions.scoped-tls]]
 version = "1.0.1"
 criteria = "safe-to-deploy"
 notes = "Not built for NBD's release targets (x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc), only under cfg(loom), via loom."
-
-[[exemptions.shared_child]]
-version = "1.1.2"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
-[[exemptions.sigchld]]
-version = "0.2.5"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
-
-[[exemptions.signal-hook]]
-version = "0.4.6"
-criteria = "safe-to-deploy"
-notes = "P5-P8: transitive dependency, vetting pending."
 
 [[exemptions.sketches-ddsketch]]
 version = "0.3.2"

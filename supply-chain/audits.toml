@@ -25,6 +25,12 @@ criteria = "safe-to-deploy"
 version = "0.4.45"
 notes = "Reviewed per the safe-to-deploy criteria: every unsafe block and powerful import. No build script or proc macro. With default features off and now only (std, alloc), two unsafe sites compile: the manual Send impl on the deprecated Date<Tz> matches the auto impl (fields NaiveDate and Tz::Offset), and NaiveDate::from_yof's NonZeroI32::new_unchecked never receives 0, since every caller keeps the year flags (bits 0-2, never zero) through masks that exclude them. The clock feature adds: CStr up to the first NUL, TimeZoneName's from_utf8_unchecked after a strict [0-9A-Za-z+-] check, mem::zeroed on POD Win32 structs, a checked GetTimeZoneInformationForYear; the unchecked assume_init calls in windows.rs are test-only. Reading TZ, /etc/localtime and TZif files is clock-only and follows POSIX TZ semantics. RUSTSEC-2020-0159 fixed since 0.4.20. Date arithmetic and formatting logic not reviewed line by line; mozilla audited every delta 0.4.19 -> 0.4.42."
 
+[[audits.duct]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.13.7"
+notes = "Process spawning library. Two unsafe blocks turn an IntoRawFd/IntoRawHandle value into a File, taking ownership as the trait requires. Signals go through shared_child under its lock. No build script, no network, no file writes of its own. Build-dependency of sasl2-sys, only run with its vendored feature, which NBD does not enable."
+
 [[audits.futures-task]]
 who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
@@ -42,6 +48,18 @@ who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
 version = "0.18.3"
 notes = "Reviewed for NBD's features (default features off, http-listener); push-gateway, protobuf and uds-listener paths not reviewed. build.rs only runs prost-build under the protobuf feature. One unsafe, evmap::new_assert_stable, is justified: keys and values hash and compare deterministically. HTTP listener checks the IP allowlist per connection and answers 403; label values escape newlines, quotes and backslashes. Discretion: no hyper timer is set, so there is no header read timeout and no connection limit; any peer, allowed or not, can hold connections open. Keep the endpoint on loopback or behind a firewall."
+
+[[audits.openssl-sys]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.9.118"
+notes = "Rust bindings to the system OpenSSL, no bundled C: build/expando.c is only preprocessed to read the version and OPENSSL_NO_* macros. build.rs: OPENSSL_LIB_DIR/OPENSSL_INCLUDE_DIR or OPENSSL_DIR, then pkg-config, then vcpkg on Windows (brew only on macOS). Accepts OpenSSL 1.1.0 to 4.x and LibreSSL 3.5 to 4.4. No network access, writes only under OUT_DIR. The bindgen CLI only runs for BoringSSL or AWS-LC headers. Rust: the 133 unsafe fn bodies reimplement C macros, each a single call to the matching ctrl function with the named constant, or a callback cast as in C. The only unsafe block in a safe fn is init(), which calls OPENSSL_init_ssl once through Once. Extern declarations were not compared one by one with the headers: upstream CI checks them with ctest (systest) across OpenSSL versions, and in NBD only curl-sys and rdkafka-sys link the crate without calling it."
+
+[[audits.os_pipe]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.2.3"
+notes = "Anonymous pipes. Unix: pipe2(O_CLOEXEC), or pipe plus fcntl(FD_CLOEXEC) on Apple, AIX and Haiku, the descriptors owned by OwnedFd before any fallible step. Windows: CreatePipe, handles wrapped only on success. FromRawFd and FromRawHandle forward their safety contract. No build script, no network."
 
 [[audits.pin-project-lite]]
 who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
@@ -72,6 +90,24 @@ who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
 criteria = "safe-to-deploy"
 version = "0.10.3"
 notes = "Full review (204 lines). forbid(unsafe_code), no_std, no build script, depends only on zeroize (serde optional). Debug redacts, zeroize on drop. Known limit: From<String> uses into_boxed_str(), which may reallocate and leave the old buffer unzeroized; deserialization leaves intermediate copies."
+
+[[audits.shared_child]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+version = "1.1.2"
+notes = "waitid(WEXITED|WNOWAIT) on a zeroed siginfo_t waits without reaping. Reaping goes through std Child::wait under the mutex, and kill() is sent under the same mutex only while the child is not reaped, so there is no PID reuse race. Windows: WaitForSingleObject on the child handle. No build script, no network."
+
+[[audits.sigchld]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.2.5"
+notes = "Non-blocking self-pipe registered with signal_hook::low_level::pipe and read with poll. The unsafe blocks are a poll on one valid pollfd and fcntl(O_NONBLOCK). Drop unregisters the handler. Unix only, no build script, no network."
+
+[[audits.signal-hook]]
+who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
+criteria = "safe-to-deploy"
+version = "0.4.6"
+notes = "All unsafe reviewed. Handlers only use async-signal-safe calls (write/send of one byte, atomic stores, _exit, sigaction, sigprocmask, raise, abort). The lock-free channel keeps its whole state in one AtomicU16 updated by CAS, each index owned by one side, Release/Acquire ordering. MaybeUninit slots are fully written before assume_init, raw siginfo slots freed once in Drop. build.rs compiles extract.c (siginfo_t field reads) only with extended-siginfo-raw. No network, no file access. NBD uses it without features, through sigchld."
 
 [[audits.signal-hook-registry]]
 who = "Claude Opus 5.5 x PetitPrinc3 <arthur.reppelin@gmail.com>"
