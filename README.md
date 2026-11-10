@@ -30,8 +30,6 @@ Each `[[provider]]` of the configuration maps one multicast group and port to on
 
 ![Each multicast group is received by a provider, which submits its datagrams to a sink. In production, the sink delivers them to the Kafka broker through librdkafka. An optional Prometheus exporter runs alongside.](./images/NBD_Operating_Principle.svg)
 
-*In production, the `FutureProducer` of this diagram is wrapped in a `ManagedProducer`.*
-
 A provider is a Tokio task that owns one UDP socket. It reads datagrams into a preallocated buffer and submits them to Kafka without blocking. When the producer queue is full, the datagram is dropped and counted.
 
 All providers share one Kafka producer. A supervisor replaces it when `librdkafka` reports a fatal error. If it can't be rebuilt within `recovery_timeout`, NBD exits with an error. See [Producer recovery](PRODUCTION.md#producer-recovery).
