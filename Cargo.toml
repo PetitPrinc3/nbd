@@ -14,7 +14,7 @@ categories = ["network-programming", "command-line-utilities"]
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "sync", "signal", "io-util"] }
 tokio-util = "0.7.19"
 socket2 = { version = "0.6.5", features = ["all"] }
-rdkafka = { version = "0.39.0", features = ["cmake-build"] }
+rdkafka = { version = "0.40.0", features = ["cmake-build"] }
 bytes = "1.12.1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
